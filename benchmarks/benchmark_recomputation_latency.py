@@ -1,4 +1,4 @@
-"""Benchmark the latency of processing a single batch of requests."""
+"""Benchmark the re-computation latency of processing a single batch of requests."""
 import argparse
 import json
 import time
@@ -64,46 +64,25 @@ def main(args: argparse.Namespace):
         "prompt_token_ids": batch
     } for batch in dummy_prompt_token_ids.tolist()]
 
-    def run_to_completion(profile_dir: Optional[str] = None):
-        if profile_dir:
-            with torch.profiler.profile(
-                    activities=[
-                        torch.profiler.ProfilerActivity.CPU,
-                        torch.profiler.ProfilerActivity.CUDA,
-                    ],
-                    on_trace_ready=torch.profiler.tensorboard_trace_handler(
-                        str(profile_dir))) as p:
-                llm.generate(dummy_prompts,
-                             sampling_params=sampling_params,
-                             use_tqdm=False)
-            print(p.key_averages())
-        else:
-            start_time = time.perf_counter()
-            llm.generate(dummy_prompts,
-                         sampling_params=sampling_params,
-                         use_tqdm=False)
-            end_time = time.perf_counter()
-            latency = end_time - start_time
-            return latency
+    def run_to_completion():
+        start_time = time.perf_counter()
+        llm.generate(dummy_prompts,
+                     sampling_params=sampling_params,
+                     use_tqdm=False)
+        end_time = time.perf_counter()
+        latency = end_time - start_time
+        return latency
 
     print("Warming up...")
     for _ in tqdm(range(args.num_iters_warmup), desc="Warmup iterations"):
-        run_to_completion(profile_dir=None)
+        run_to_completion()
 
-    if args.profile:
-        profile_dir = args.profile_result_dir
-        if not profile_dir:
-            profile_dir = Path(
-                "."
-            ) / "vllm_benchmark_result" / f"latency_result_{time.time()}"
-        print(f"Profiling (results will be saved to '{profile_dir}')...")
-        run_to_completion(profile_dir=profile_dir)
-        return
-
-    # Benchmark.
+    # Core Benchmark.
     latencies = []
     for _ in tqdm(range(args.num_iters), desc="Profiling iterations"):
-        latencies.append(run_to_completion(profile_dir=None))
+        latencies.append(run_to_completion())
+
+    # Report statistics.
     latencies = np.array(latencies)
     percentages = [10, 25, 50, 75, 90, 99]
     percentiles = np.percentile(latencies, percentages)
@@ -111,15 +90,6 @@ def main(args: argparse.Namespace):
     for percentage, percentile in zip(percentages, percentiles):
         print(f'{percentage}% percentile latency: {percentile} seconds')
 
-    # Output JSON results if specified
-    if args.output_json:
-        results = {
-            "avg_latency": np.mean(latencies),
-            "latencies": latencies.tolist(),
-            "percentiles": dict(zip(percentages, percentiles.tolist())),
-        }
-        with open(args.output_json, "w") as f:
-            json.dump(results, f, indent=4)
 
 
 if __name__ == '__main__':
@@ -194,16 +164,6 @@ if __name__ == '__main__':
         'accuracy issues. FP8_E5M2 (without scaling) is only supported on '
         'cuda version greater than 11.8. On ROCm (AMD GPU), FP8_E4M3 is '
         'instead supported for common inference criteria.')
-    parser.add_argument(
-        '--profile',
-        action='store_true',
-        help='profile the generation process of a single batch')
-    parser.add_argument(
-        '--profile-result-dir',
-        type=str,
-        default=None,
-        help=('path to save the pytorch profiler output. Can be visualized '
-              'with ui.perfetto.dev or Tensorboard.'))
     parser.add_argument("--device",
                         type=str,
                         default="auto",
