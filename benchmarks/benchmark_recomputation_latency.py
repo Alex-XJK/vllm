@@ -33,12 +33,23 @@ class BenchmarkDim:
     def __str__(self):
         return f"max_seq_len={self.max_seq_len}, batch_size={self.batch_size}, chunk_size={self.chunk_size}"
 
+
+DEBUG_MODE = True
+"""
+Print a debug message if DEBUG_MODE is enabled.
+"""
+def debug_print(prompt: str):
+    if DEBUG_MODE:
+        print(f"DEBUG >> {prompt}")
+
+
 """
 Generate dummy prompts for the re-computation latency benchmark.
 """
 def generate_dummy_prompts(batch_size: int, input_len: int) -> List[PromptType]:
     dummy_prompt_token_ids = np.random.randint(10000, size=(batch_size, input_len))
     return [{"prompt_token_ids": batch} for batch in dummy_prompt_token_ids.tolist()]
+
 
 """
 Generate benchmark dimensions for the re-computation latency benchmark.
@@ -68,10 +79,9 @@ def generate_benchmark_dims() -> List[BenchmarkDim]:
                 benchmark_dims.append(BenchmarkDim(max_seq_len, batch_size, chunk_size))
 
     # Debug
-    print(f"DEBUG >> Generated {len(benchmark_dims)} benchmark dimensions.")
+    debug_print(f"Generated {len(benchmark_dims)} benchmark dimensions.")
     for benchmark_dim in benchmark_dims:
-        print(benchmark_dim)
-    print(f"DEBUG >> ")
+        debug_print(f"{benchmark_dim}")
 
     return benchmark_dims
 
@@ -87,15 +97,14 @@ def time_run_to_completion(llm: LLM, prompts: List[PromptType], sampling_params:
 
 
 def main(args: argparse.Namespace):
-    print(f"DEBUG >> Running benchmark with args: {args}")
-    print(f"DEBUG >> ")
+    debug_print(f"Running benchmark with args: {args}")
 
     benchmark_dimensions = generate_benchmark_dims()
 
     for benchmark_dim in benchmark_dimensions:
-        print(f"DEBUG >> Running benchmark with dimension:")
-        print(f"DEBUG >> {benchmark_dim}")
-        print(f"DEBUG >> ")
+        print(f"INFO >> Running benchmark with dimension:")
+        print(f"INFO >> {benchmark_dim}")
+        print(f"INFO >> ")
 
         assert benchmark_dim.max_seq_len % benchmark_dim.chunk_size == 0
         num_chunked_prefill_iters = benchmark_dim.max_seq_len // benchmark_dim.chunk_size
@@ -125,13 +134,12 @@ def main(args: argparse.Namespace):
             ignore_eos=True,
             max_tokens=args.output_len,
         )
-        print(f"DEBUG >> Sampling params: {sampling_params}")
-        print(f"DEBUG >> ")
+        debug_print(f"Sampling params: {sampling_params}")
 
         # Generate dummy prompts.
         dummy_prompts = generate_dummy_prompts(benchmark_dim.batch_size, benchmark_dim.max_seq_len)
 
-        print("Warming up...")
+        print(f"INFO >> Warming up...")
         for _ in tqdm(range(args.num_iters_warmup), desc="Warmup iterations"):
             time_run_to_completion(llm, dummy_prompts, sampling_params)
 
@@ -144,9 +152,9 @@ def main(args: argparse.Namespace):
     latencies = np.array(latencies)
     percentages = [10, 25, 50, 75, 90, 99]
     percentiles = np.percentile(latencies, percentages)
-    print(f'Avg latency: {np.mean(latencies)} seconds')
+    print(f'INFO >> Avg latency: {np.mean(latencies)} seconds')
     for percentage, percentile in zip(percentages, percentiles):
-        print(f'{percentage}% percentile latency: {percentile} seconds')
+        print(f'INFO >> {percentage}% percentile latency: {percentile} seconds')
 
 
 
