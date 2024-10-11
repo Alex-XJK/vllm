@@ -1,8 +1,11 @@
-"""Benchmark the re-computation latency of processing a single batch of requests."""
+"""
+Benchmark the re-computation latency of processing a single batch of requests.
+Author: Alex
+"""
 import argparse
-import json
+import math
 import time
-from pathlib import Path
+from dataclasses import dataclass
 from typing import List, Optional
 
 import numpy as np
@@ -12,75 +15,132 @@ from tqdm import tqdm
 from vllm import LLM, SamplingParams
 from vllm.engine.arg_utils import DEVICE_OPTIONS, EngineArgs
 from vllm.inputs import PromptType
-from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.utils import FlexibleArgumentParser
+
+CACHE_SIZE_PER_TOKEN = 131072 # Determined by the model
+CHUNK_SIZE_LOG_MIN = 8 # Arbitrary
+TOKEN_SIZE_LOG_MIN = 8 # Arbitrary, but should be at least chunk size min
+TOKEN_SIZE_LOG_MAX = 17  # Determined by number of GPU blocks (~ GPU HBM size).
+MAX_MODEL_TOKENS = 65536 # Should have been 131072 but we truncate to 65536 otherwise it throws a CUDA error
+NUM_PASSES = 4
+
+@dataclass
+class BenchmarkDim:
+    max_seq_len: int
+    batch_size: int
+    chunk_size: int
+
+    def __str__(self):
+        return f"max_seq_len={self.max_seq_len}, batch_size={self.batch_size}, chunk_size={self.chunk_size}"
+
+"""
+Generate dummy prompts for the re-computation latency benchmark.
+"""
+def generate_dummy_prompts(batch_size: int, input_len: int) -> List[PromptType]:
+    dummy_prompt_token_ids = np.random.randint(10000, size=(batch_size, input_len))
+    return [{"prompt_token_ids": batch} for batch in dummy_prompt_token_ids.tolist()]
+
+"""
+Generate benchmark dimensions for the re-computation latency benchmark.
+Author: Schwinn
+"""
+def generate_benchmark_dims() -> List[BenchmarkDim]:
+    benchmark_dims = []
+
+    token_count_logs = torch.linspace(start=TOKEN_SIZE_LOG_MIN, end=TOKEN_SIZE_LOG_MAX, steps=TOKEN_SIZE_LOG_MAX-TOKEN_SIZE_LOG_MIN+1, dtype=int).tolist()
+    token_count_logs = reversed(token_count_logs)
+
+    for token_count_log in token_count_logs:
+        token_count = int(2 ** token_count_log)
+
+        chunk_size_log_max = min(token_count_log, int(math.log2(MAX_MODEL_TOKENS)))
+        chunk_size_logs = torch.linspace(start=CHUNK_SIZE_LOG_MIN, end=chunk_size_log_max, steps=chunk_size_log_max-CHUNK_SIZE_LOG_MIN+1, dtype=int).tolist()
+        chunk_size_logs = reversed(chunk_size_logs)
+        for chunk_size_log in chunk_size_logs:
+            chunk_size = int(2 ** chunk_size_log)
+
+            batch_size_log_lo = max(token_count_log - int(math.log2(MAX_MODEL_TOKENS)), 0)
+            batch_size_log_hi = token_count_log - chunk_size_log
+            batch_sizes = torch.logspace(start=batch_size_log_lo, end=batch_size_log_hi, steps=batch_size_log_hi-batch_size_log_lo+1, base=2, dtype=int).tolist()
+
+            for batch_size in batch_sizes:
+                max_seq_len = token_count // batch_size
+                benchmark_dims.append(BenchmarkDim(max_seq_len, batch_size, chunk_size))
+
+    # Debug
+    print(f"DEBUG >> Generated {len(benchmark_dims)} benchmark dimensions.")
+    for benchmark_dim in benchmark_dims:
+        print(benchmark_dim)
+    print(f"DEBUG >> ")
+
+    return benchmark_dims
+
+
+def time_run_to_completion(llm: LLM, prompts: List[PromptType], sampling_params: SamplingParams):
+    start_time = time.perf_counter()
+    llm.generate(prompts,
+                 sampling_params=sampling_params,
+                 use_tqdm=False)
+    end_time = time.perf_counter()
+    latency = end_time - start_time
+    return latency
 
 
 def main(args: argparse.Namespace):
-    print(args)
+    print(f"DEBUG >> Running benchmark with args: {args}")
+    print(f"DEBUG >> ")
 
-    # NOTE(woosuk): If the request cannot be processed in a single batch,
-    # the engine will automatically process the request in multiple batches.
-    llm = LLM(
-        model=args.model,
-        speculative_model=args.speculative_model,
-        num_speculative_tokens=args.num_speculative_tokens,
-        speculative_draft_tensor_parallel_size=\
-            args.speculative_draft_tensor_parallel_size,
-        tokenizer=args.tokenizer,
-        quantization=args.quantization,
-        tensor_parallel_size=args.tensor_parallel_size,
-        trust_remote_code=args.trust_remote_code,
-        dtype=args.dtype,
-        max_model_len=args.max_model_len,
-        enforce_eager=args.enforce_eager,
-        kv_cache_dtype=args.kv_cache_dtype,
-        quantization_param_path=args.quantization_param_path,
-        device=args.device,
-        ray_workers_use_nsight=args.ray_workers_use_nsight,
-        use_v2_block_manager=args.use_v2_block_manager,
-        enable_chunked_prefill=args.enable_chunked_prefill,
-        download_dir=args.download_dir,
-        block_size=args.block_size,
-        gpu_memory_utilization=args.gpu_memory_utilization,
-        load_format=args.load_format,
-        distributed_executor_backend=args.distributed_executor_backend,
-        otlp_traces_endpoint=args.otlp_traces_endpoint,
-        enable_prefix_caching=args.enable_prefix_caching,
-    )
+    benchmark_dimensions = generate_benchmark_dims()
 
-    sampling_params = SamplingParams(
-        n=args.n,
-        temperature=1.0,
-        top_p=1.0,
-        ignore_eos=True,
-        max_tokens=args.output_len,
-    )
-    print(sampling_params)
-    dummy_prompt_token_ids = np.random.randint(10000,
-                                               size=(args.batch_size,
-                                                     args.input_len))
-    dummy_prompts: List[PromptType] = [{
-        "prompt_token_ids": batch
-    } for batch in dummy_prompt_token_ids.tolist()]
+    for benchmark_dim in benchmark_dimensions:
+        print(f"DEBUG >> Running benchmark with dimension:")
+        print(f"DEBUG >> {benchmark_dim}")
+        print(f"DEBUG >> ")
 
-    def run_to_completion():
-        start_time = time.perf_counter()
-        llm.generate(dummy_prompts,
-                     sampling_params=sampling_params,
-                     use_tqdm=False)
-        end_time = time.perf_counter()
-        latency = end_time - start_time
-        return latency
+        assert benchmark_dim.max_seq_len % benchmark_dim.chunk_size == 0
+        num_chunked_prefill_iters = benchmark_dim.max_seq_len // benchmark_dim.chunk_size
 
-    print("Warming up...")
-    for _ in tqdm(range(args.num_iters_warmup), desc="Warmup iterations"):
-        run_to_completion()
+        # NOTE(woosuk): If the request cannot be processed in a single batch,
+        # the engine will automatically process the request in multiple batches.
+        llm = LLM(
+            model=args.model,
+            speculative_draft_tensor_parallel_size=\
+                args.speculative_draft_tensor_parallel_size,
+            tensor_parallel_size=args.tensor_parallel_size,
+            trust_remote_code=args.trust_remote_code,
+            enforce_eager=args.enforce_eager,
+            kv_cache_dtype=args.kv_cache_dtype,
+            device=args.device,
+            ray_workers_use_nsight=args.ray_workers_use_nsight,
+            use_v2_block_manager=args.use_v2_block_manager,
+            enable_chunked_prefill=args.enable_chunked_prefill,
+            download_dir=args.download_dir,
+            block_size=args.block_size,
+            gpu_memory_utilization=args.gpu_memory_utilization,
+            enable_prefix_caching=args.enable_prefix_caching,
+        )
 
-    # Core Benchmark.
-    latencies = []
-    for _ in tqdm(range(args.num_iters), desc="Profiling iterations"):
-        latencies.append(run_to_completion())
+        sampling_params = SamplingParams(
+            n=args.n,
+            temperature=1.0,
+            top_p=1.0,
+            ignore_eos=True,
+            max_tokens=args.output_len,
+        )
+        print(f"DEBUG >> Sampling params: {sampling_params}")
+        print(f"DEBUG >> ")
+
+        # Generate dummy prompts.
+        dummy_prompts = generate_dummy_prompts(benchmark_dim.batch_size, benchmark_dim.max_seq_len)
+
+        print("Warming up...")
+        for _ in tqdm(range(args.num_iters_warmup), desc="Warmup iterations"):
+            time_run_to_completion(llm, dummy_prompts, sampling_params)
+
+        # Core Benchmark.
+        latencies = []
+        for _ in tqdm(range(args.num_iters), desc="Profiling iterations"):
+            latencies.append(time_run_to_completion(llm, dummy_prompts, sampling_params))
 
     # Report statistics.
     latencies = np.array(latencies)
@@ -97,17 +157,6 @@ if __name__ == '__main__':
         description='Benchmark the latency of processing a single batch of '
         'requests till completion.')
     parser.add_argument('--model', type=str, default='facebook/opt-125m')
-    parser.add_argument('--speculative-model', type=str, default=None)
-    parser.add_argument('--num-speculative-tokens', type=int, default=None)
-    parser.add_argument('--speculative-draft-tensor-parallel-size',
-                        '-spec-draft-tp',
-                        type=int,
-                        default=None)
-    parser.add_argument('--tokenizer', type=str, default=None)
-    parser.add_argument('--quantization',
-                        '-q',
-                        choices=[*QUANTIZATION_METHODS, None],
-                        default=None)
     parser.add_argument('--tensor-parallel-size', '-tp', type=int, default=1)
     parser.add_argument('--input-len', type=int, default=32)
     parser.add_argument('--output-len', type=int, default=128)
@@ -128,21 +177,6 @@ if __name__ == '__main__':
     parser.add_argument('--trust-remote-code',
                         action='store_true',
                         help='trust remote code from huggingface')
-    parser.add_argument(
-        '--max-model-len',
-        type=int,
-        default=None,
-        help='Maximum length of a sequence (including prompt and output). '
-        'If None, will be derived from the model.')
-    parser.add_argument(
-        '--dtype',
-        type=str,
-        default='auto',
-        choices=['auto', 'half', 'float16', 'bfloat16', 'float', 'float32'],
-        help='data type for model weights and activations. '
-        'The "auto" option will use FP16 precision '
-        'for FP32 and FP16 models, and BF16 precision '
-        'for BF16 models.')
     parser.add_argument('--enforce-eager',
                         action='store_true',
                         help='enforce eager mode and disable CUDA graph')
@@ -154,16 +188,6 @@ if __name__ == '__main__':
         help='Data type for kv cache storage. If "auto", will use model '
         'data type. CUDA 11.8+ supports fp8 (=fp8_e4m3) and fp8_e5m2. '
         'ROCm (AMD GPU) supports fp8 (=fp8_e4m3)')
-    parser.add_argument(
-        '--quantization-param-path',
-        type=str,
-        default=None,
-        help='Path to the JSON file containing the KV cache scaling factors. '
-        'This should generally be supplied, when KV cache dtype is FP8. '
-        'Otherwise, KV cache scaling factors default to 1.0, which may cause '
-        'accuracy issues. FP8_E5M2 (without scaling) is only supported on '
-        'cuda version greater than 11.8. On ROCm (AMD GPU), FP8_E4M3 is '
-        'instead supported for common inference criteria.')
     parser.add_argument("--device",
                         type=str,
                         default="auto",
@@ -192,51 +216,11 @@ if __name__ == '__main__':
                         default=None,
                         help='directory to download and load the weights, '
                         'default to the default cache dir of huggingface')
-    parser.add_argument(
-        '--output-json',
-        type=str,
-        default=None,
-        help='Path to save the latency results in JSON format.')
     parser.add_argument('--gpu-memory-utilization',
                         type=float,
                         default=0.9,
                         help='the fraction of GPU memory to be used for '
                         'the model executor, which can range from 0 to 1.'
                         'If unspecified, will use the default value of 0.9.')
-    parser.add_argument(
-        '--load-format',
-        type=str,
-        default=EngineArgs.load_format,
-        choices=[
-            'auto', 'pt', 'safetensors', 'npcache', 'dummy', 'tensorizer',
-            'bitsandbytes'
-        ],
-        help='The format of the model weights to load.\n\n'
-        '* "auto" will try to load the weights in the safetensors format '
-        'and fall back to the pytorch bin format if safetensors format '
-        'is not available.\n'
-        '* "pt" will load the weights in the pytorch bin format.\n'
-        '* "safetensors" will load the weights in the safetensors format.\n'
-        '* "npcache" will load the weights in pytorch format and store '
-        'a numpy cache to speed up the loading.\n'
-        '* "dummy" will initialize the weights with random values, '
-        'which is mainly for profiling.\n'
-        '* "tensorizer" will load the weights using tensorizer from '
-        'CoreWeave. See the Tensorize vLLM Model script in the Examples'
-        'section for more information.\n'
-        '* "bitsandbytes" will load the weights using bitsandbytes '
-        'quantization.\n')
-    parser.add_argument(
-        '--distributed-executor-backend',
-        choices=['ray', 'mp'],
-        default=None,
-        help='Backend to use for distributed serving. When more than 1 GPU '
-        'is used, will be automatically set to "ray" if installed '
-        'or "mp" (multiprocessing) otherwise.')
-    parser.add_argument(
-        '--otlp-traces-endpoint',
-        type=str,
-        default=None,
-        help='Target URL to which OpenTelemetry traces will be sent.')
     args = parser.parse_args()
     main(args)
