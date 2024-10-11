@@ -104,8 +104,6 @@ def main(args: argparse.Namespace):
         # the engine will automatically process the request in multiple batches.
         llm = LLM(
             model=args.model,
-            speculative_draft_tensor_parallel_size=\
-                args.speculative_draft_tensor_parallel_size,
             tensor_parallel_size=args.tensor_parallel_size,
             trust_remote_code=args.trust_remote_code,
             enforce_eager=args.enforce_eager,
