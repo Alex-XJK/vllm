@@ -14,9 +14,7 @@ import torch
 from tqdm import tqdm
 
 from vllm import LLM, SamplingParams, LLMEngine
-from vllm.config import SchedulerConfig
-from vllm.core.scheduler import PreemptionMode
-from vllm.engine.arg_utils import DEVICE_OPTIONS, EngineArgs
+from vllm.engine.arg_utils import EngineArgs
 from vllm.entrypoints.api_server import engine
 from vllm.inputs import PromptType
 from vllm.utils import FlexibleArgumentParser
@@ -90,20 +88,6 @@ def generate_benchmark_dims() -> List[BenchmarkDim]:
     return benchmark_dims
 
 
-"""
-Run the benchmark to completion and return the latency.
-Deprecated: Use used by the old benchmarking code.
-"""
-def time_run_to_completion(llm: LLM, prompts: List[PromptType], sampling_params: SamplingParams):
-    start_time = time.perf_counter()
-    llm.generate(prompts,
-                 sampling_params=sampling_params,
-                 use_tqdm=False)
-    end_time = time.perf_counter()
-    latency = end_time - start_time
-    return latency
-
-
 def main(args: argparse.Namespace):
     debug_print(f"Running benchmark with args: {args}")
 
@@ -121,18 +105,15 @@ def main(args: argparse.Namespace):
         # TODO: What is a "chunk_size" in sarathi?
         # scheduler_config = SchedulerConfig(
         #     max_num_seqs=benchmark_dim.batch_size,
-        #     max_model_len=benchmark_dim.max_seq_len * benchmark_dim.batch_size,
-        #     # chunk_size=benchmark_dim.chunk_size,
+        #     chunk_size=benchmark_dim.chunk_size,
         #     max_num_batched_tokens=benchmark_dim.max_seq_len * benchmark_dim.batch_size,
-        #     preemption_mode="recompute",
-        #     enable_chunked_prefill=True,
         # )
 
         engine_args = EngineArgs(
             max_num_seqs=benchmark_dim.batch_size,
             max_model_len=benchmark_dim.max_seq_len * benchmark_dim.batch_size,
             max_num_batched_tokens=benchmark_dim.max_seq_len * benchmark_dim.batch_size,
-            preemption_mode="recompute",
+            preemption_mode=args.preemption_mode,
             enable_chunked_prefill=True,
         )
         my_engine = LLMEngine.from_engine_args(engine_args)
@@ -203,73 +184,15 @@ def main(args: argparse.Namespace):
 
 if __name__ == '__main__':
     parser = FlexibleArgumentParser(
-        description='Benchmark the latency of processing a single batch of '
-        'requests till completion.')
-    parser.add_argument('--model', type=str, default='facebook/opt-125m')
-    parser.add_argument('--tensor-parallel-size', '-tp', type=int, default=1)
-    parser.add_argument('--input-len', type=int, default=32)
-    parser.add_argument('--output-len', type=int, default=128)
-    parser.add_argument('--batch-size', type=int, default=8)
-    parser.add_argument('--n',
-                        type=int,
-                        default=1,
-                        help='Number of generated sequences per prompt.')
-    parser.add_argument('--use-beam-search', action='store_true')
-    parser.add_argument('--num-iters-warmup',
-                        type=int,
-                        default=10,
-                        help='Number of iterations to run for warmup.')
-    parser.add_argument('--num-iters',
-                        type=int,
-                        default=30,
-                        help='Number of iterations to run.')
-    parser.add_argument('--trust-remote-code',
-                        action='store_true',
-                        help='trust remote code from huggingface')
-    parser.add_argument('--enforce-eager',
-                        action='store_true',
-                        help='enforce eager mode and disable CUDA graph')
+        description='Benchmark the re-computation latency of processing a single batch of requests.')
     parser.add_argument(
-        '--kv-cache-dtype',
+        '--preemption-mode',
         type=str,
-        choices=['auto', 'fp8', 'fp8_e5m2', 'fp8_e4m3'],
-        default="auto",
-        help='Data type for kv cache storage. If "auto", will use model '
-        'data type. CUDA 11.8+ supports fp8 (=fp8_e4m3) and fp8_e5m2. '
-        'ROCm (AMD GPU) supports fp8 (=fp8_e4m3)')
-    parser.add_argument("--device",
-                        type=str,
-                        default="auto",
-                        choices=DEVICE_OPTIONS,
-                        help='device type for vLLM execution')
-    parser.add_argument('--block-size',
-                        type=int,
-                        default=16,
-                        help='block size of key/value cache')
-    parser.add_argument(
-        '--enable-chunked-prefill',
-        action='store_true',
-        help='If True, the prefill requests can be chunked based on the '
-        'max_num_batched_tokens')
-    parser.add_argument("--enable-prefix-caching",
-                        action='store_true',
-                        help="Enable automatic prefix caching")
-    parser.add_argument('--use-v2-block-manager', action='store_true')
-    parser.add_argument(
-        "--ray-workers-use-nsight",
-        action='store_true',
-        help="If specified, use nsight to profile ray workers",
-    )
-    parser.add_argument('--download-dir',
-                        type=str,
-                        default=None,
-                        help='directory to download and load the weights, '
-                        'default to the default cache dir of huggingface')
-    parser.add_argument('--gpu-memory-utilization',
-                        type=float,
-                        default=0.9,
-                        help='the fraction of GPU memory to be used for '
-                        'the model executor, which can range from 0 to 1.'
-                        'If unspecified, will use the default value of 0.9.')
+        choices=['recompute', 'swap'],
+        default="recompute",
+        help='If \'recompute\', the engine performs preemption by '
+             'recomputing; If \'swap\', the engine performs preemption by '
+             'block swapping.')
+
     args = parser.parse_args()
     main(args)
