@@ -12,8 +12,11 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
-from vllm import LLM, SamplingParams
+from vllm import LLM, SamplingParams, LLMEngine
+from vllm.config import SchedulerConfig
+from vllm.core.scheduler import PreemptionMode
 from vllm.engine.arg_utils import DEVICE_OPTIONS, EngineArgs
+from vllm.entrypoints.api_server import engine
 from vllm.inputs import PromptType
 from vllm.utils import FlexibleArgumentParser
 
@@ -86,6 +89,10 @@ def generate_benchmark_dims() -> List[BenchmarkDim]:
     return benchmark_dims
 
 
+"""
+Run the benchmark to completion and return the latency.
+Deprecated: Use used by the old benchmarking code.
+"""
 def time_run_to_completion(llm: LLM, prompts: List[PromptType], sampling_params: SamplingParams):
     start_time = time.perf_counter()
     llm.generate(prompts,
@@ -111,33 +118,51 @@ def main(args: argparse.Namespace):
 
         # NOTE(woosuk): If the request cannot be processed in a single batch,
         # the engine will automatically process the request in multiple batches.
-        llm = LLM(
-            model=args.model,
-            tensor_parallel_size=args.tensor_parallel_size,
-            trust_remote_code=args.trust_remote_code,
-            enforce_eager=args.enforce_eager,
-            kv_cache_dtype=args.kv_cache_dtype,
-            device=args.device,
-            ray_workers_use_nsight=args.ray_workers_use_nsight,
-            use_v2_block_manager=args.use_v2_block_manager,
-            enable_chunked_prefill=args.enable_chunked_prefill,
-            download_dir=args.download_dir,
-            block_size=args.block_size,
-            gpu_memory_utilization=args.gpu_memory_utilization,
-            enable_prefix_caching=args.enable_prefix_caching,
-        )
+        # llm = LLM(
+        #     model=args.model,
+        #     tensor_parallel_size=args.tensor_parallel_size,
+        #     trust_remote_code=args.trust_remote_code,
+        #     enforce_eager=args.enforce_eager,
+        #     kv_cache_dtype=args.kv_cache_dtype,
+        #     device=args.device,
+        #     ray_workers_use_nsight=args.ray_workers_use_nsight,
+        #     use_v2_block_manager=args.use_v2_block_manager,
+        #     enable_chunked_prefill=args.enable_chunked_prefill,
+        #     download_dir=args.download_dir,
+        #     block_size=args.block_size,
+        #     gpu_memory_utilization=args.gpu_memory_utilization,
+        #     enable_prefix_caching=args.enable_prefix_caching,
+        # )
 
-        sampling_params = SamplingParams(
-            n=args.n,
-            temperature=1.0,
-            top_p=1.0,
-            ignore_eos=True,
-            max_tokens=args.output_len,
-        )
-        debug_print(f"Sampling params: {sampling_params}")
+        # TODO: What is a "chunk_size" in sarathi?
+        # scheduler_config = SchedulerConfig(
+        #     max_num_seqs=benchmark_dim.batch_size,
+        #     max_model_len=benchmark_dim.max_seq_len * benchmark_dim.batch_size,
+        #     # chunk_size=benchmark_dim.chunk_size,
+        #     max_num_batched_tokens=benchmark_dim.max_seq_len * benchmark_dim.batch_size,
+        #     preemption_mode="recompute",
+        #     enable_chunked_prefill=True,
+        # )
 
-        # Generate dummy prompts.
-        dummy_prompts = generate_dummy_prompts(benchmark_dim.batch_size, benchmark_dim.max_seq_len)
+        engine_args = EngineArgs(
+            max_num_seqs=benchmark_dim.batch_size,
+            max_model_len=benchmark_dim.max_seq_len * benchmark_dim.batch_size,
+            max_num_batched_tokens=benchmark_dim.max_seq_len * benchmark_dim.batch_size,
+            preemption_mode="recompute",
+            enable_chunked_prefill=True,
+        )
+        my_engine = LLMEngine.from_engine_args(engine_args)
+
+        dummy_prompts = generate_dummy_prompts(2 * benchmark_dim.batch_size, benchmark_dim.max_seq_len)
+        sampling_params = SamplingParams(temperature=0, max_tokens=benchmark_dim.max_seq_len)
+
+        print(f"INFO >> Creating {2 * benchmark_dim.batch_size} sequences of length {benchmark_dim.max_seq_len}...")
+        for i in tqdm(range(2 * benchmark_dim.batch_size), desc="Adding requests"):
+            my_engine.add_request(
+                request_id=str(i),
+                prompt=dummy_prompts[i],
+                params=sampling_params,
+            )
 
         print(f"INFO >> Warming up...")
         for _ in tqdm(range(args.num_iters_warmup), desc="Warmup iterations"):
