@@ -111,7 +111,7 @@ def main(args: argparse.Namespace):
 
         engine_args = EngineArgs(
             max_num_seqs=benchmark_dim.batch_size,
-            max_model_len=benchmark_dim.max_seq_len * benchmark_dim.batch_size,
+            # max_model_len=benchmark_dim.max_seq_len * benchmark_dim.batch_size,
             max_num_batched_tokens=benchmark_dim.max_seq_len * benchmark_dim.batch_size,
             preemption_mode=args.preemption_mode,
             enable_chunked_prefill=True,
