@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import List, Optional
 
 import numpy as np
+import pandas as pd
 import torch
 from tqdm import tqdm
 
@@ -107,6 +108,7 @@ def main(args: argparse.Namespace):
     debug_print(f"Running benchmark with args: {args}")
 
     benchmark_dimensions = generate_benchmark_dims()
+    benchmark_results = []
 
     for benchmark_dim in benchmark_dimensions:
         print(f"INFO >> Running benchmark with dimension:")
@@ -115,24 +117,6 @@ def main(args: argparse.Namespace):
 
         assert benchmark_dim.max_seq_len % benchmark_dim.chunk_size == 0
         num_chunked_prefill_iters = benchmark_dim.max_seq_len // benchmark_dim.chunk_size
-
-        # NOTE(woosuk): If the request cannot be processed in a single batch,
-        # the engine will automatically process the request in multiple batches.
-        # llm = LLM(
-        #     model=args.model,
-        #     tensor_parallel_size=args.tensor_parallel_size,
-        #     trust_remote_code=args.trust_remote_code,
-        #     enforce_eager=args.enforce_eager,
-        #     kv_cache_dtype=args.kv_cache_dtype,
-        #     device=args.device,
-        #     ray_workers_use_nsight=args.ray_workers_use_nsight,
-        #     use_v2_block_manager=args.use_v2_block_manager,
-        #     enable_chunked_prefill=args.enable_chunked_prefill,
-        #     download_dir=args.download_dir,
-        #     block_size=args.block_size,
-        #     gpu_memory_utilization=args.gpu_memory_utilization,
-        #     enable_prefix_caching=args.enable_prefix_caching,
-        # )
 
         # TODO: What is a "chunk_size" in sarathi?
         # scheduler_config = SchedulerConfig(
@@ -165,21 +149,55 @@ def main(args: argparse.Namespace):
             )
 
         print(f"INFO >> Warming up...")
-        for _ in tqdm(range(args.num_iters_warmup), desc="Warmup iterations"):
-            time_run_to_completion(llm, dummy_prompts, sampling_params)
+        for _ in tqdm(range(num_chunked_prefill_iters), desc="Warmup iterations"):
+            engine.step()
 
-        # Core Benchmark.
+        print(f"INFO >> Profiling iterations...")
         latencies = []
-        for _ in tqdm(range(args.num_iters), desc="Profiling iterations"):
-            latencies.append(time_run_to_completion(llm, dummy_prompts, sampling_params))
 
-    # Report statistics.
-    latencies = np.array(latencies)
-    percentages = [10, 25, 50, 75, 90, 99]
-    percentiles = np.percentile(latencies, percentages)
-    print(f'INFO >> Avg latency: {np.mean(latencies)} seconds')
-    for percentage, percentile in zip(percentages, percentiles):
-        print(f'INFO >> {percentage}% percentile latency: {percentile} seconds')
+        total_iters = NUM_PASSES * num_chunked_prefill_iters
+
+        start_all = time.perf_counter_ns()
+        start = time.perf_counter_ns()
+
+        for i in range(total_iters):
+            outputs = engine.step()
+
+            if i % num_chunked_prefill_iters == num_chunked_prefill_iters - 1:
+                end = time.perf_counter_ns()
+                latencies.append((end - start) / 1e6)
+                print(f"{i:8d}/{total_iters} ::\t Recomputation of whole batch took: {latencies[-1]} ms")
+                start = time.perf_counter_ns()
+
+        end_all = time.perf_counter_ns()
+
+        engine.terminate()
+
+        # Report statistics.
+        mean_latency_all_div = (end_all - start_all) / (1e6 * NUM_PASSES)
+
+        mean_latency = torch.mean(torch.tensor(latencies)).item()
+        std_latency = torch.std(torch.tensor(latencies)).item()
+        print(f"Mean latency: {mean_latency} ms, "
+              f"std latency: {std_latency} ms, "
+              f"mean latency (all divided by num passes): {mean_latency_all_div}"
+              )
+
+        engine.terminate()
+
+        benchmark_results.append({
+            'chunk_size': benchmark_dim.chunk_size,
+            'token_count': benchmark_dim.max_seq_len * benchmark_dim.batch_size,
+            'batch_size': benchmark_dim.batch_size,
+            'max_seq_len': benchmark_dim.max_seq_len,
+            'mean_latency': mean_latency,
+            'std_latency': std_latency,
+            'mean_latency_all_div': mean_latency_all_div,
+            'kv_cache_size': CACHE_SIZE_PER_TOKEN * benchmark_dim.max_seq_len * benchmark_dim.batch_size
+        })
+
+    df = pd.DataFrame(benchmark_results)
+    df.to_csv("prefill_latency_profiling.csv", index=False)
 
 
 
