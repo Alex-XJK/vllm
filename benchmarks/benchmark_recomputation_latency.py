@@ -91,6 +91,9 @@ def generate_benchmark_dims() -> List[BenchmarkDim]:
 def main(args: argparse.Namespace):
     debug_print(f"Running benchmark with args: {args}")
 
+    global CACHE_SIZE_PER_TOKEN
+    CACHE_SIZE_PER_TOKEN = args.cache_size_per_token
+
     benchmark_dimensions = generate_benchmark_dims()
     benchmark_results = []
 
@@ -110,6 +113,7 @@ def main(args: argparse.Namespace):
         # )
 
         engine_args = EngineArgs(
+            model=args.model,
             max_num_seqs=benchmark_dim.batch_size,
             max_num_batched_tokens=benchmark_dim.max_seq_len * benchmark_dim.batch_size,
             preemption_mode=args.preemption_mode,
@@ -185,6 +189,11 @@ if __name__ == '__main__':
     parser = FlexibleArgumentParser(
         description='Benchmark the re-computation latency of processing a single batch of requests.')
     parser.add_argument(
+        '--model',
+        type=str,
+        default=EngineArgs.model,
+        help='Name or path of the huggingface model to use.')
+    parser.add_argument(
         '--preemption-mode',
         type=str,
         choices=['recompute', 'swap'],
@@ -192,6 +201,10 @@ if __name__ == '__main__':
         help='If \'recompute\', the engine performs preemption by '
              'recomputing; If \'swap\', the engine performs preemption by '
              'block swapping.')
-
+    parser.add_argument(
+        '--cache-size-per-token',
+        type=int,
+        default=CACHE_SIZE_PER_TOKEN,
+        help='Size of the cache per token in bytes. Determined by the model.')
     args = parser.parse_args()
     main(args)
