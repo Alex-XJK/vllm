@@ -13,7 +13,7 @@ import pandas as pd
 import torch
 from tqdm import tqdm
 
-from vllm import LLM, SamplingParams, LLMEngine
+from vllm import LLM, SamplingParams, LLMEngine, TokensPrompt
 from vllm.engine.arg_utils import EngineArgs
 from vllm.entrypoints.api_server import engine
 from vllm.inputs import PromptType
@@ -111,21 +111,20 @@ def main(args: argparse.Namespace):
 
         engine_args = EngineArgs(
             max_num_seqs=benchmark_dim.batch_size,
-            # max_model_len=benchmark_dim.max_seq_len * benchmark_dim.batch_size,
             max_num_batched_tokens=benchmark_dim.max_seq_len * benchmark_dim.batch_size,
             preemption_mode=args.preemption_mode,
-            enable_chunked_prefill=True,
         )
         my_engine = LLMEngine.from_engine_args(engine_args)
 
-        dummy_prompts = generate_dummy_prompts(2 * benchmark_dim.batch_size, benchmark_dim.max_seq_len)
+        # dummy_prompts = generate_dummy_prompts(2 * benchmark_dim.batch_size, benchmark_dim.max_seq_len)
         sampling_params = SamplingParams(temperature=0, max_tokens=benchmark_dim.max_seq_len)
 
         print(f"INFO >> Creating {2 * benchmark_dim.batch_size} sequences of length {benchmark_dim.max_seq_len}...")
         for i in tqdm(range(2 * benchmark_dim.batch_size), desc="Adding requests"):
+            prompt_token_ids = TokensPrompt(prompt_token_ids=list(range(benchmark_dim.max_seq_len)))
             my_engine.add_request(
                 request_id=str(i),
-                prompt=dummy_prompts[i],
+                prompt=prompt_token_ids,
                 params=sampling_params,
             )
 
