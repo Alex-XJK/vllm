@@ -138,7 +138,7 @@ def main(args: argparse.Namespace):
         for _ in tqdm(range(num_chunked_prefill_iters), desc="Warmup iterations"):
             my_engine.step()
 
-        print(f"INFO >> Profiling iterations...")
+        print(f"INFO >> Profiling iterations... will run {NUM_PASSES} * {num_chunked_prefill_iters} iterations.")
         print(f"INFO >> ")
         latencies = []
 
