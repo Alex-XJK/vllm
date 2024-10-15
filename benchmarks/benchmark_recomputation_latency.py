@@ -124,6 +124,7 @@ def main(args: argparse.Namespace):
         sampling_params = SamplingParams(temperature=0, max_tokens=benchmark_dim.max_seq_len)
 
         print(f"INFO >> Creating {2 * benchmark_dim.batch_size} sequences of length {benchmark_dim.max_seq_len}...")
+        print(f"INFO >> ")
         for i in tqdm(range(2 * benchmark_dim.batch_size), desc="Adding requests"):
             prompt_token_ids = TokensPrompt(prompt_token_ids=list(range(benchmark_dim.max_seq_len)))
             my_engine.add_request(
@@ -133,10 +134,12 @@ def main(args: argparse.Namespace):
             )
 
         print(f"INFO >> Warming up...")
+        print(f"INFO >> ")
         for _ in tqdm(range(num_chunked_prefill_iters), desc="Warmup iterations"):
-            engine.step()
+            my_engine.step()
 
         print(f"INFO >> Profiling iterations...")
+        print(f"INFO >> ")
         latencies = []
 
         total_iters = NUM_PASSES * num_chunked_prefill_iters
@@ -145,7 +148,7 @@ def main(args: argparse.Namespace):
         start = time.perf_counter_ns()
 
         for i in range(total_iters):
-            outputs = engine.step()
+            outputs = my_engine.step()
 
             if i % num_chunked_prefill_iters == num_chunked_prefill_iters - 1:
                 end = time.perf_counter_ns()
@@ -155,7 +158,7 @@ def main(args: argparse.Namespace):
 
         end_all = time.perf_counter_ns()
 
-        engine.terminate()
+        # my_engine.terminate() # LLMEngine seems doesn't have a terminate method.
 
         # Report statistics.
         mean_latency_all_div = (end_all - start_all) / (1e6 * NUM_PASSES)
@@ -166,8 +169,6 @@ def main(args: argparse.Namespace):
               f"std latency: {std_latency} ms, "
               f"mean latency (all divided by num passes): {mean_latency_all_div}"
               )
-
-        engine.terminate()
 
         benchmark_results.append({
             'chunk_size': benchmark_dim.chunk_size,
