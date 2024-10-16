@@ -117,6 +117,7 @@ def main(args: argparse.Namespace):
             max_num_seqs=benchmark_dim.batch_size,
             max_num_batched_tokens=benchmark_dim.max_seq_len * benchmark_dim.batch_size,
             preemption_mode=args.preemption_mode,
+            enable_chunked_prefill=True,
         )
         my_engine = LLMEngine.from_engine_args(engine_args)
 
@@ -192,7 +193,7 @@ if __name__ == '__main__':
     parser.add_argument(
         '--model',
         type=str,
-        default=EngineArgs.model,
+        default="meta-llama/Llama-3.1-8B",
         help='Name or path of the huggingface model to use.')
     parser.add_argument(
         '--preemption-mode',
