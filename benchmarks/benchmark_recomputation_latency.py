@@ -2,6 +2,7 @@
 Benchmark the re-computation latency of processing a single batch of requests.
 Author: Alex
 """
+import gc
 import argparse
 import math
 import time
@@ -159,7 +160,13 @@ def main(args: argparse.Namespace):
 
         end_all = time.perf_counter_ns()
 
-        # my_engine.terminate() # LLMEngine seems doesn't have a terminate method.
+        # my_engine.terminate()
+        # LLMEngine seems doesn't have a terminate method as it does in Sarathi
+        # Terminate the engine and clean up CUDA memory.
+        # Otherwise, the CUDA memory usage will keep increasing, and out-of-memory soon in 2nd iteration.
+        del my_engine
+        gc.collect()
+        torch.cuda.empty_cache()
 
         # Report statistics.
         mean_latency_all_div = (end_all - start_all) / (1e6 * NUM_PASSES)
