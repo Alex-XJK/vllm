@@ -7,6 +7,7 @@ import argparse
 import math
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import List, Optional
 
 import numpy as np
@@ -145,6 +146,43 @@ def mainloop_beautify(engine: LLMEngine, repetitions: int, num_iters: int) -> tu
     return latencies, mean_latency_all_div
 
 
+def mainloop_profiling(engine: LLMEngine, num_iters: int, dim: BenchmarkDim) -> tuple:
+    """
+    Main loop for the benchmarking.
+    Use profiler to profile the CUDA usage as well.
+    """
+    profile_dir = Path(".") / "vllm_benchmark_result" / f"benchmark_re_{dim.max_seq_len}_{dim.batch_size}_{dim.chunk_size}_{time.time()}"
+
+    print(f"INFO >> Profiling enabled. Run only ONE pass.")
+
+    latencies = []
+    with torch.profiler.profile(
+        activities=[
+            torch.profiler.ProfilerActivity.CPU,
+            torch.profiler.ProfilerActivity.CUDA,
+        ],
+        on_trace_ready=torch.profiler.tensorboard_trace_handler(str(profile_dir))
+        ) as p:
+
+        start_all = time.perf_counter_ns()
+        start = time.perf_counter_ns()
+
+        # Critical part
+        for _ in range(num_iters):
+            outputs = engine.step()
+
+        end = time.perf_counter_ns()
+        end_all = time.perf_counter_ns()
+
+    print(f"INFO >> Pass 1/1 :: Recomputation of whole batch took: {(end - start) / 1e6} ms")
+    print(f"INFO >> Profiling results will be saved to '{profile_dir}'...")
+
+    latencies.append((end - start) / 1e6)
+
+    mean_latency_all_div = (end_all - start_all) / 1e6
+
+    return latencies, mean_latency_all_div
+
 
 def main(args: argparse.Namespace):
     debug_print(f"Running benchmark with args: {args}")
@@ -202,6 +240,8 @@ def main(args: argparse.Namespace):
 
         if args.run_mode == "beautify":
             latencies, mean_latency_all_div = mainloop_beautify(my_engine, NUM_PASSES, num_chunked_prefill_iters)
+        elif args.run_mode == "profiling":
+            latencies, mean_latency_all_div = mainloop_profiling(my_engine, num_chunked_prefill_iters, benchmark_dim)
         else:
             latencies, mean_latency_all_div = mainloop_traditional(my_engine, NUM_PASSES, num_chunked_prefill_iters)
 
@@ -261,9 +301,10 @@ if __name__ == '__main__':
     parser.add_argument(
         '--run-mode',
         type=str,
-        choices=['traditional', 'beautify'],
+        choices=['traditional', 'beautify', 'profiling'],
         default="beautify",
         help='If \'traditional\', the benchmark will run with Schwinn\'s original logic; '
-                'If \'beautify\', the benchmark will run with progress bar and my own logic.')
+                'If \'beautify\', the benchmark will run with progress bar and my own logic.'
+                'If \'profiling\', the benchmark will run with profiler enabled.')
     args = parser.parse_args()
     main(args)
