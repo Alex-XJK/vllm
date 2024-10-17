@@ -7,6 +7,7 @@ import argparse
 import math
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import List, Optional
 
 import numpy as np
@@ -38,27 +39,27 @@ class BenchmarkDim:
 
 
 DEBUG_MODE = True
-"""
-Print a debug message if DEBUG_MODE is enabled.
-"""
 def debug_print(prompt: str):
+    """
+    Print a debug message if DEBUG_MODE is enabled.
+    """
     if DEBUG_MODE:
         print(f"DEBUG >> {prompt}")
 
 
-"""
-Generate dummy prompts for the re-computation latency benchmark.
-"""
 def generate_dummy_prompts(batch_size: int, input_len: int) -> List[PromptType]:
+    """
+    Generate dummy prompts for the re-computation latency benchmark.
+    """
     dummy_prompt_token_ids = np.random.randint(10000, size=(batch_size, input_len))
     return [{"prompt_token_ids": batch} for batch in dummy_prompt_token_ids.tolist()]
 
 
-"""
-Generate benchmark dimensions for the re-computation latency benchmark.
-Author: Schwinn
-"""
 def generate_benchmark_dims() -> List[BenchmarkDim]:
+    """
+    Generate benchmark dimensions for the re-computation latency benchmark.
+    Author: Schwinn
+    """
     benchmark_dims = []
 
     token_count_logs = torch.linspace(start=TOKEN_SIZE_LOG_MIN, end=TOKEN_SIZE_LOG_MAX, steps=TOKEN_SIZE_LOG_MAX-TOKEN_SIZE_LOG_MIN+1, dtype=int).tolist()
@@ -81,12 +82,106 @@ def generate_benchmark_dims() -> List[BenchmarkDim]:
                 max_seq_len = token_count // batch_size
                 benchmark_dims.append(BenchmarkDim(max_seq_len, batch_size, chunk_size))
 
+    # Reverse the order of the benchmark dimensions, so that the smallest ones are tested first.
+    benchmark_dims.reverse()
+
     # Debug
     debug_print(f"Generated {len(benchmark_dims)} benchmark dimensions.")
     for benchmark_dim in benchmark_dims:
         debug_print(f"{benchmark_dim}")
 
     return benchmark_dims
+
+
+def mainloop_traditional(engine: LLMEngine, repetitions: int, num_iters: int) -> tuple:
+    """
+    Main loop for the benchmarking.
+    Use Schwinn's originnal coding logic.
+    """
+    latencies = []
+
+    total_iters = repetitions * num_iters
+
+    start_all = time.perf_counter_ns()
+    start = time.perf_counter_ns()
+
+    for i in range(total_iters):
+        outputs = engine.step()
+
+        if i % num_iters == num_iters - 1:
+            end = time.perf_counter_ns()
+            latencies.append((end - start) / 1e6)
+            print(f"{i + 1:8d}/{total_iters} ::\t Recomputation of whole batch took: {latencies[-1]} ms")
+            start = time.perf_counter_ns()
+
+    end_all = time.perf_counter_ns()
+    mean_latency_all_div = (end_all - start_all) / (1e6 * repetitions)
+
+    return latencies, mean_latency_all_div
+
+
+def mainloop_beautify(engine: LLMEngine, repetitions: int, num_iters: int) -> tuple:
+    """
+    Main loop for the benchmarking.
+    Use my own logic and tqdm for progress bar. (may add extra IO overhead)
+    """
+    latencies = []
+
+    start_all = time.perf_counter_ns()
+
+    for i in range(repetitions):
+        start = time.perf_counter_ns()
+
+        # Critical part
+        for _ in tqdm(range(num_iters), desc=f"Pass {i+1}/{repetitions}"):
+            outputs = engine.step()
+
+        end = time.perf_counter_ns()
+        print(f"INFO >> Pass {i+1}/{repetitions} :: Recomputation of whole batch took: {(end - start) / 1e6} ms")
+        latencies.append((end - start) / 1e6)
+
+    end_all = time.perf_counter_ns()
+    mean_latency_all_div = (end_all - start_all) / (1e6 * repetitions)
+
+    return latencies, mean_latency_all_div
+
+
+def mainloop_profiling(engine: LLMEngine, num_iters: int, dim: BenchmarkDim) -> tuple:
+    """
+    Main loop for the benchmarking.
+    Use profiler to profile the CUDA usage as well.
+    """
+    profile_dir = Path(".") / "vllm_benchmark_result" / f"benchmark_re_{dim.max_seq_len}_{dim.batch_size}_{dim.chunk_size}_{time.time()}"
+
+    print(f"INFO >> Profiling enabled. Run only ONE pass.")
+
+    latencies = []
+    with torch.profiler.profile(
+        activities=[
+            torch.profiler.ProfilerActivity.CPU,
+            torch.profiler.ProfilerActivity.CUDA,
+        ],
+        on_trace_ready=torch.profiler.tensorboard_trace_handler(str(profile_dir))
+        ) as p:
+
+        start_all = time.perf_counter_ns()
+        start = time.perf_counter_ns()
+
+        # Critical part
+        for _ in range(num_iters):
+            outputs = engine.step()
+
+        end = time.perf_counter_ns()
+        end_all = time.perf_counter_ns()
+
+    print(f"INFO >> Pass 1/1 :: Recomputation of whole batch took: {(end - start) / 1e6} ms")
+    print(f"INFO >> Profiling results will be saved to '{profile_dir}'...")
+
+    latencies.append((end - start) / 1e6)
+
+    mean_latency_all_div = (end_all - start_all) / 1e6
+
+    return latencies, mean_latency_all_div
 
 
 def main(args: argparse.Namespace):
@@ -142,34 +237,22 @@ def main(args: argparse.Namespace):
 
         print(f"INFO >> Profiling iterations... will run {NUM_PASSES} * {num_chunked_prefill_iters} iterations.")
         print(f"INFO >> ")
-        latencies = []
 
-        total_iters = NUM_PASSES * num_chunked_prefill_iters
+        if args.run_mode == "beautify":
+            latencies, mean_latency_all_div = mainloop_beautify(my_engine, NUM_PASSES, num_chunked_prefill_iters)
+        elif args.run_mode == "profiling":
+            latencies, mean_latency_all_div = mainloop_profiling(my_engine, num_chunked_prefill_iters, benchmark_dim)
+        else:
+            latencies, mean_latency_all_div = mainloop_traditional(my_engine, NUM_PASSES, num_chunked_prefill_iters)
 
-        start_all = time.perf_counter_ns()
-        start = time.perf_counter_ns()
 
-        for i in range(total_iters):
-            outputs = my_engine.step()
-
-            if i % num_chunked_prefill_iters == num_chunked_prefill_iters - 1:
-                end = time.perf_counter_ns()
-                latencies.append((end - start) / 1e6)
-                print(f"{i:8d}/{total_iters} ::\t Recomputation of whole batch took: {latencies[-1]} ms")
-                start = time.perf_counter_ns()
-
-        end_all = time.perf_counter_ns()
-
-        # my_engine.terminate()
         # LLMEngine seems doesn't have a terminate method as it does in Sarathi
         # Terminate the engine and clean up CUDA memory.
         # Otherwise, the CUDA memory usage will keep increasing, and out-of-memory soon in 2nd iteration.
         del my_engine
         gc.collect()
         torch.cuda.empty_cache()
-
-        # Report statistics.
-        mean_latency_all_div = (end_all - start_all) / (1e6 * NUM_PASSES)
+        # my_engine.terminate()
 
         mean_latency = torch.mean(torch.tensor(latencies)).item()
         std_latency = torch.std(torch.tensor(latencies)).item()
@@ -215,5 +298,13 @@ if __name__ == '__main__':
         type=int,
         default=CACHE_SIZE_PER_TOKEN,
         help='Size of the cache per token in bytes. Determined by the model.')
+    parser.add_argument(
+        '--run-mode',
+        type=str,
+        choices=['traditional', 'beautify', 'profiling'],
+        default="beautify",
+        help='If \'traditional\', the benchmark will run with Schwinn\'s original logic; '
+                'If \'beautify\', the benchmark will run with progress bar and my own logic.'
+                'If \'profiling\', the benchmark will run with profiler enabled.')
     args = parser.parse_args()
     main(args)
