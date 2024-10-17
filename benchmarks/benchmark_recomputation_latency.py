@@ -119,6 +119,33 @@ def mainloop_traditional(engine: LLMEngine, repetitions: int, num_iters: int) ->
     return latencies, mean_latency_all_div
 
 
+def mainloop_beautify(engine: LLMEngine, repetitions: int, num_iters: int) -> tuple:
+    """
+    Main loop for the benchmarking.
+    Use my own logic and tqdm for progress bar. (may add extra IO overhead)
+    """
+    latencies = []
+
+    start_all = time.perf_counter_ns()
+
+    for i in range(repetitions):
+        start = time.perf_counter_ns()
+
+        # Critical part
+        for _ in tqdm(range(num_iters), desc=f"Pass {i+1}/{repetitions}"):
+            outputs = engine.step()
+
+        end = time.perf_counter_ns()
+        print(f"INFO >> Pass {i+1}/{repetitions} :: Recomputation of whole batch took: {(end - start) / 1e6} ms")
+        latencies.append((end - start) / 1e6)
+
+    end_all = time.perf_counter_ns()
+    mean_latency_all_div = (end_all - start_all) / (1e6 * repetitions)
+
+    return latencies, mean_latency_all_div
+
+
+
 def main(args: argparse.Namespace):
     debug_print(f"Running benchmark with args: {args}")
 
@@ -172,7 +199,11 @@ def main(args: argparse.Namespace):
 
         print(f"INFO >> Profiling iterations... will run {NUM_PASSES} * {num_chunked_prefill_iters} iterations.")
         print(f"INFO >> ")
-        latencies, mean_latency_all_div = mainloop_traditional(my_engine, NUM_PASSES, num_chunked_prefill_iters)
+
+        if args.run_mode == "beautify":
+            latencies, mean_latency_all_div = mainloop_beautify(my_engine, NUM_PASSES, num_chunked_prefill_iters)
+        else:
+            latencies, mean_latency_all_div = mainloop_traditional(my_engine, NUM_PASSES, num_chunked_prefill_iters)
 
 
         # LLMEngine seems doesn't have a terminate method as it does in Sarathi
@@ -227,5 +258,12 @@ if __name__ == '__main__':
         type=int,
         default=CACHE_SIZE_PER_TOKEN,
         help='Size of the cache per token in bytes. Determined by the model.')
+    parser.add_argument(
+        '--run-mode',
+        type=str,
+        choices=['traditional', 'beautify'],
+        default="beautify",
+        help='If \'traditional\', the benchmark will run with Schwinn\'s original logic; '
+                'If \'beautify\', the benchmark will run with progress bar and my own logic.')
     args = parser.parse_args()
     main(args)
