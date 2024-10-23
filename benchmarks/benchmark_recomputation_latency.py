@@ -3,6 +3,7 @@ Benchmark the re-computation latency of processing a single batch of requests.
 Author: Alex
 """
 import gc
+import os
 import argparse
 import math
 import time
@@ -194,88 +195,104 @@ def main(args: argparse.Namespace):
     benchmark_dimensions = generate_benchmark_dims()
     benchmark_results = []
 
-    for benchmark_dim in benchmark_dimensions:
-        print(f"INFO >> Running benchmark with dimension:")
-        print(f"INFO >> {benchmark_dim}")
-        print(f"INFO >> ")
+    csv_path = args.file_out
+    if csv_path is None:
+        pid = os.getpid()
+        csv_path = f"prefill_latency_profiling_{pid}.csv"
 
-        assert benchmark_dim.max_seq_len % benchmark_dim.chunk_size == 0
-        num_chunked_prefill_iters = benchmark_dim.max_seq_len // benchmark_dim.chunk_size
+    with open(csv_path, mode='a', newline='') as f:
+        print(f"INFO >> Writing intermediate results to '{csv_path}'...")
 
-        # TODO: What is a "chunk_size" in sarathi?
-        # scheduler_config = SchedulerConfig(
-        #     max_num_seqs=benchmark_dim.batch_size,
-        #     chunk_size=benchmark_dim.chunk_size,
-        #     max_num_batched_tokens=benchmark_dim.max_seq_len * benchmark_dim.batch_size,
-        # )
+        for benchmark_dim in benchmark_dimensions:
+            print(f"INFO >> Running benchmark with dimension:")
+            print(f"INFO >> {benchmark_dim}")
+            print(f"INFO >> ")
 
-        engine_args = EngineArgs(
-            model=args.model,
-            max_num_seqs=benchmark_dim.batch_size,
-            max_num_batched_tokens=benchmark_dim.chunk_size * benchmark_dim.batch_size,
-            preemption_mode=args.preemption_mode,
-            enable_chunked_prefill=True,
-        )
-        my_engine = LLMEngine.from_engine_args(engine_args)
+            assert benchmark_dim.max_seq_len % benchmark_dim.chunk_size == 0
+            num_chunked_prefill_iters = benchmark_dim.max_seq_len // benchmark_dim.chunk_size
 
-        # dummy_prompts = generate_dummy_prompts(2 * benchmark_dim.batch_size, benchmark_dim.max_seq_len)
-        sampling_params = SamplingParams(temperature=0, max_tokens=benchmark_dim.max_seq_len)
+            # TODO: What is a "chunk_size" in sarathi?
+            # scheduler_config = SchedulerConfig(
+            #     max_num_seqs=benchmark_dim.batch_size,
+            #     chunk_size=benchmark_dim.chunk_size,
+            #     max_num_batched_tokens=benchmark_dim.max_seq_len * benchmark_dim.batch_size,
+            # )
 
-        print(f"INFO >> Creating {2 * benchmark_dim.batch_size} sequences of length {benchmark_dim.max_seq_len}...")
-        print(f"INFO >> ")
-        for i in tqdm(range(2 * benchmark_dim.batch_size), desc="Adding requests"):
-            prompt_token_ids = TokensPrompt(prompt_token_ids=list(range(benchmark_dim.max_seq_len)))
-            my_engine.add_request(
-                request_id=str(i),
-                prompt=prompt_token_ids,
-                params=sampling_params,
+            engine_args = EngineArgs(
+                model=args.model,
+                max_num_seqs=benchmark_dim.batch_size,
+                max_num_batched_tokens=benchmark_dim.chunk_size * benchmark_dim.batch_size,
+                preemption_mode=args.preemption_mode,
+                enable_chunked_prefill=True,
             )
+            my_engine = LLMEngine.from_engine_args(engine_args)
 
-        print(f"INFO >> Warming up...")
-        print(f"INFO >> ")
-        for _ in tqdm(range(num_chunked_prefill_iters), desc="Warmup iterations"):
-            my_engine.step()
+            # dummy_prompts = generate_dummy_prompts(2 * benchmark_dim.batch_size, benchmark_dim.max_seq_len)
+            sampling_params = SamplingParams(temperature=0, max_tokens=benchmark_dim.max_seq_len)
 
-        print(f"INFO >> Profiling iterations... will run {NUM_PASSES} * {num_chunked_prefill_iters} iterations.")
-        print(f"INFO >> ")
+            print(f"INFO >> Creating {2 * benchmark_dim.batch_size} sequences of length {benchmark_dim.max_seq_len}...")
+            print(f"INFO >> ")
+            for i in tqdm(range(2 * benchmark_dim.batch_size), desc="Adding requests"):
+                prompt_token_ids = TokensPrompt(prompt_token_ids=list(range(benchmark_dim.max_seq_len)))
+                my_engine.add_request(
+                    request_id=str(i),
+                    prompt=prompt_token_ids,
+                    params=sampling_params,
+                )
 
-        if args.run_mode == "beautify":
-            latencies, mean_latency_all_div = mainloop_beautify(my_engine, NUM_PASSES, num_chunked_prefill_iters)
-        elif args.run_mode == "profiling":
-            latencies, mean_latency_all_div = mainloop_profiling(my_engine, num_chunked_prefill_iters, benchmark_dim)
-        else:
-            latencies, mean_latency_all_div = mainloop_traditional(my_engine, NUM_PASSES, num_chunked_prefill_iters)
+            print(f"INFO >> Warming up...")
+            print(f"INFO >> ")
+            for _ in tqdm(range(num_chunked_prefill_iters), desc="Warmup iterations"):
+                my_engine.step()
+
+            print(f"INFO >> Profiling iterations... will run {NUM_PASSES} * {num_chunked_prefill_iters} iterations.")
+            print(f"INFO >> ")
+
+            if args.run_mode == "beautify":
+                latencies, mean_latency_all_div = mainloop_beautify(my_engine, NUM_PASSES, num_chunked_prefill_iters)
+            elif args.run_mode == "profiling":
+                latencies, mean_latency_all_div = mainloop_profiling(my_engine, num_chunked_prefill_iters, benchmark_dim)
+            else:
+                latencies, mean_latency_all_div = mainloop_traditional(my_engine, NUM_PASSES, num_chunked_prefill_iters)
 
 
-        # LLMEngine seems doesn't have a terminate method as it does in Sarathi
-        # Terminate the engine and clean up CUDA memory.
-        # Otherwise, the CUDA memory usage will keep increasing, and out-of-memory soon in 2nd iteration.
-        del my_engine
-        gc.collect()
-        torch.cuda.empty_cache()
-        # my_engine.terminate()
+            # LLMEngine seems doesn't have a terminate method as it does in Sarathi
+            # Terminate the engine and clean up CUDA memory.
+            # Otherwise, the CUDA memory usage will keep increasing, and out-of-memory soon in 2nd iteration.
+            del my_engine
+            gc.collect()
+            torch.cuda.empty_cache()
 
-        mean_latency = torch.mean(torch.tensor(latencies)).item()
-        std_latency = torch.std(torch.tensor(latencies)).item()
-        print(f"Mean latency: {mean_latency} ms, "
-              f"std latency: {std_latency} ms, "
-              f"mean latency (all divided by num passes): {mean_latency_all_div}"
-              )
+            mean_latency = torch.mean(torch.tensor(latencies)).item()
+            std_latency = torch.std(torch.tensor(latencies)).item()
+            print(f"Mean latency: {mean_latency} ms, "
+                f"std latency: {std_latency} ms, "
+                f"mean latency (all divided by num passes): {mean_latency_all_div}"
+                )
 
-        benchmark_results.append({
-            'chunk_size': benchmark_dim.chunk_size,
-            'token_count': benchmark_dim.max_seq_len * benchmark_dim.batch_size,
-            'batch_size': benchmark_dim.batch_size,
-            'max_seq_len': benchmark_dim.max_seq_len,
-            'mean_latency': mean_latency,
-            'std_latency': std_latency,
-            'mean_latency_all_div': mean_latency_all_div,
-            'kv_cache_size': CACHE_SIZE_PER_TOKEN * benchmark_dim.max_seq_len * benchmark_dim.batch_size
-        })
+            benchmark_result = {
+                'chunk_size': benchmark_dim.chunk_size,
+                'token_count': benchmark_dim.max_seq_len * benchmark_dim.batch_size,
+                'batch_size': benchmark_dim.batch_size,
+                'max_seq_len': benchmark_dim.max_seq_len,
+                'mean_latency': mean_latency,
+                'std_latency': std_latency,
+                'mean_latency_all_div': mean_latency_all_div,
+                'kv_cache_size': CACHE_SIZE_PER_TOKEN * benchmark_dim.max_seq_len * benchmark_dim.batch_size
+            }
+            benchmark_results.append(benchmark_result)
+
+            # Save the intermediate results to a CSV file.
+            df = pd.DataFrame([benchmark_result])
+            if f.tell() == 0:
+                df.to_csv(f, index=False)
+            else:
+                df.to_csv(f, header=False, index=False)
+            f.flush()
 
     df = pd.DataFrame(benchmark_results)
+    print(f"INFO >> Writing final results to 'prefill_latency_profiling.csv'...")
     df.to_csv("prefill_latency_profiling.csv", index=False)
-
 
 
 if __name__ == '__main__':
@@ -307,5 +324,10 @@ if __name__ == '__main__':
         help='If \'traditional\', the benchmark will run with Schwinn\'s original logic; '
                 'If \'beautify\', the benchmark will run with progress bar and my own logic.'
                 'If \'profiling\', the benchmark will run with profiler enabled.')
+    parser.add_argument(
+        '--file-out',
+        type=str,
+        default=None,
+        help='Output file for the benchmark, if not specified, will generate one.')
     args = parser.parse_args()
     main(args)
