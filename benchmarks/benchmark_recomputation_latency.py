@@ -94,6 +94,28 @@ def generate_benchmark_dims() -> List[BenchmarkDim]:
     return benchmark_dims
 
 
+def manual_benchmark_dims(manual_str: str) -> List[BenchmarkDim]:
+    """
+    Parse the manual benchmark dimensions from the command line.
+    The string should be in the format 'max_seq_len,batch_size,chunk_size'.
+    """
+    def validate_input(input):
+        parts = input.split(',')
+        if len(parts) != 3:
+            return None
+        x, y, z = map(int, parts)
+        return x, y, z
+
+    benchmark_dims = []
+    while validate_input(manual_str) is None:
+        manual_str = input("Please enter in the format 'max_seq_len,batch_size,chunk_size': ")
+
+    max_seq_len, batch_size, chunk_size = validate_input(manual_str)
+    benchmark_dims.append(BenchmarkDim(max_seq_len, batch_size, chunk_size))
+    return benchmark_dims
+
+
+
 def mainloop_traditional(engine: LLMEngine, repetitions: int, num_iters: int) -> tuple:
     """
     Main loop for the benchmarking.
@@ -186,13 +208,23 @@ def mainloop_profiling(engine: LLMEngine, num_iters: int, dim: BenchmarkDim) -> 
     return latencies, mean_latency_all_div
 
 
+def config_global(args: argparse.Namespace):
+    global CACHE_SIZE_PER_TOKEN
+    CACHE_SIZE_PER_TOKEN = args.cache_size_per_token
+    global NUM_PASSES
+    NUM_PASSES = args.repetitions
+
+
 def main(args: argparse.Namespace):
     debug_print(f"Running benchmark with args: {args}")
 
-    global CACHE_SIZE_PER_TOKEN
-    CACHE_SIZE_PER_TOKEN = args.cache_size_per_token
+    config_global(args)
 
-    benchmark_dimensions = generate_benchmark_dims()
+    benchmark_dimensions = []
+    if args.manual is not None:
+        benchmark_dimensions = manual_benchmark_dims(args.manual)
+    else:
+        benchmark_dimensions = generate_benchmark_dims()
     benchmark_results = []
 
     csv_path = args.file_out
@@ -324,6 +356,18 @@ if __name__ == '__main__':
         help='If \'traditional\', the benchmark will run with Schwinn\'s original logic; '
                 'If \'beautify\', the benchmark will run with progress bar and my own logic.'
                 'If \'profiling\', the benchmark will run with profiler enabled.')
+    parser.add_argument(
+        '--repetitions',
+        type=int,
+        default=NUM_PASSES,
+        help='Number of repetitions for the benchmark.')
+    parser.add_argument(
+        '--manual',
+        type=str,
+        default=None,
+        help='Manual mode, if specified, will use the specified benchmark dimensions.'
+             'Otherwise, will generate benchmark dimensions automatically.'
+             'The format should be "max_seq_len,batch_size,chunk_size".')
     parser.add_argument(
         '--file-out',
         type=str,
