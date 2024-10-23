@@ -161,6 +161,7 @@ def mainloop_profiling(engine: LLMEngine, num_iters: int, dim: BenchmarkDim) -> 
             torch.profiler.ProfilerActivity.CPU,
             torch.profiler.ProfilerActivity.CUDA,
         ],
+        profile_memory=True,
         on_trace_ready=torch.profiler.tensorboard_trace_handler(str(profile_dir))
         ) as p:
 
