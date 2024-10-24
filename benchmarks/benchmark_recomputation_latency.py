@@ -16,9 +16,12 @@ import pandas as pd
 import torch
 from tqdm import tqdm
 
-from vllm import LLM, SamplingParams, LLMEngine, TokensPrompt
+from prometheus_client import start_http_server
+
+from vllm import SamplingParams, LLMEngine, TokensPrompt
 from vllm.engine.arg_utils import EngineArgs
-from vllm.entrypoints.api_server import engine
+from vllm.engine.metrics import LoggingStatLogger, PrometheusStatLogger
+from vllm.engine.multiprocessing.client import logger
 from vllm.inputs import PromptType
 from vllm.utils import FlexibleArgumentParser
 
@@ -250,14 +253,21 @@ def main(args: argparse.Namespace):
             #     max_num_batched_tokens=benchmark_dim.max_seq_len * benchmark_dim.batch_size,
             # )
 
+            # Try to use the vllm built-in logger.
+            isProfiling = args.run_mode == "profiling"
+            alogger = LoggingStatLogger(0.001)
+            plogger = PrometheusStatLogger(0.01, dict(model_name=args.model), benchmark_dim.max_seq_len)
+            loggerDict = {"logging": alogger, "prometheus": plogger}
+
             engine_args = EngineArgs(
                 model=args.model,
+                disable_log_stats=not isProfiling, # For logger
                 max_num_seqs=benchmark_dim.batch_size,
                 max_num_batched_tokens=benchmark_dim.chunk_size * benchmark_dim.batch_size,
                 preemption_mode=args.preemption_mode,
                 enable_chunked_prefill=True,
             )
-            my_engine = LLMEngine.from_engine_args(engine_args)
+            my_engine = LLMEngine.from_engine_args(engine_args=engine_args, stat_loggers=loggerDict) # For logger
 
             # dummy_prompts = generate_dummy_prompts(2 * benchmark_dim.batch_size, benchmark_dim.max_seq_len)
             sampling_params = SamplingParams(temperature=0, max_tokens=benchmark_dim.max_seq_len)
@@ -328,6 +338,9 @@ def main(args: argparse.Namespace):
 
 
 if __name__ == '__main__':
+    # For Prometheus server, refresh frequency is not very satisfactory.
+    start_http_server(8000)
+
     parser = FlexibleArgumentParser(
         description='Benchmark the re-computation latency of processing a single batch of requests.')
     parser.add_argument(
