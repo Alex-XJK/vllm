@@ -38,6 +38,17 @@ class BenchmarkDim:
         return f"max_seq_len={self.max_seq_len}, batch_size={self.batch_size}, chunk_size={self.chunk_size}"
 
 
+def stat_memory_now() -> tuple:
+    """
+    Get the current CUDA memory usage of allocated and reserved memory in bytes.
+    """
+    return torch.cuda.memory_allocated(), torch.cuda.memory_reserved()
+
+
+def bytes_to_gb(bytes: int) -> float:
+    return bytes / 1024 / 1024 / 1024
+
+
 def generate_benchmark_dims() -> List[BenchmarkDim]:
     """
     Generate benchmark dimensions for the re-computation latency benchmark.
@@ -107,16 +118,17 @@ def main(args: argparse.Namespace):
 
     for benchmark_dim in benchmark_dimensions:
 
+        # In this special debugging mode, the benchmark will only run once, with no chunk size optimization.
         if benchmark_dim.max_seq_len != benchmark_dim.chunk_size:
             continue
 
         print(f"INFO >> Running benchmark with dimension:")
         print(f"INFO >> ===== {benchmark_dim} =====")
-        print(f"DEBUG >> In this special debugging mode, the benchmark will only run once, with no chunk size optimization.")
 
-        # Try to use the vllm built-in logger.
         alogger = LoggingStatLogger(0.001)
         logger_dict = {"logging": alogger}
+
+        mem_aloc_init, mem_resv_init = stat_memory_now()
 
         engine_args = EngineArgs(
             model=args.model,
@@ -130,6 +142,8 @@ def main(args: argparse.Namespace):
 
         sampling_params = SamplingParams(temperature=0, max_tokens=benchmark_dim.max_seq_len)
 
+        mem_aloc_built, mem_resv_built = stat_memory_now()
+
         print(f"INFO >> Creating {2 * benchmark_dim.batch_size} sequences of length {benchmark_dim.max_seq_len}...")
         for i in range(2 * benchmark_dim.batch_size):
             prompt_token_ids = TokensPrompt(prompt_token_ids=list(range(benchmark_dim.max_seq_len)))
@@ -139,8 +153,12 @@ def main(args: argparse.Namespace):
                 params=sampling_params,
             )
 
+        mem_aloc_filled, mem_resv_filled = stat_memory_now()
+
         print(f"INFO >> Warming up...")
         my_engine.step()
+
+        mem_aloc_warm, mem_resv_warm = stat_memory_now()
 
         profile_dir = Path(".") / "vllm_benchmark_result" / f"benchmark_re_{benchmark_dim.max_seq_len}_{benchmark_dim.batch_size}_{benchmark_dim.chunk_size}_{time.time()}"
 
@@ -158,6 +176,7 @@ def main(args: argparse.Namespace):
             outputs = my_engine.step()
 
             time_end = time.perf_counter_ns()
+            mem_aloc_step, mem_resv_step = stat_memory_now()
 
         latency = (time_end - time_start) / 1e6
 
@@ -165,7 +184,22 @@ def main(args: argparse.Namespace):
         gc.collect()
         torch.cuda.empty_cache()
 
-        print(f"Latency: {latency} ms")
+        mem_aloc_clean, mem_resv_clean = stat_memory_now()
+
+        print(f"+==================== Benchmark completed ====================")
+        print(f"|===== Dimension: {benchmark_dim}")
+        print(f"|===== Latency: {latency} ms")
+        print(f"|===== Saved to {profile_dir}")
+        print(f"|===== Memory Usage:")
+        print(f"|===== + {'-' * 10} + {'Aloc':>5} + {'Resv':>5} +")
+        print(f"|===== | {'Init':<10} | {bytes_to_gb(mem_aloc_init):>5.2f} | {bytes_to_gb(mem_resv_init):>5.2f} |")
+        print(f"|===== | {'Built':<10} | {bytes_to_gb(mem_aloc_built):>5.2f} | {bytes_to_gb(mem_resv_built):>5.2f} |")
+        print(f"|===== | {'Filled':<10} | {bytes_to_gb(mem_aloc_filled):>5.2f} | {bytes_to_gb(mem_resv_filled):>5.2f} |")
+        print(f"|===== | {'Warm':<10} | {bytes_to_gb(mem_aloc_warm):>5.2f} | {bytes_to_gb(mem_resv_warm):>5.2f} |")
+        print(f"|===== | {'Step':<10} | {bytes_to_gb(mem_aloc_step):>5.2f} | {bytes_to_gb(mem_resv_step):>5.2f} |")
+        print(f"|===== | {'Clean':<10} | {bytes_to_gb(mem_aloc_clean):>5.2f} | {bytes_to_gb(mem_resv_clean):>5.2f} |")
+        print(f"|===== + {'-' * 10} + {'-' * 5} + {'GB':>5} +")
+        print(f"+=============================================================")
 
 
 if __name__ == '__main__':
