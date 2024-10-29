@@ -20,6 +20,7 @@ from vllm import SamplingParams, LLMEngine, TokensPrompt
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.metrics import LoggingStatLogger, PrometheusStatLogger
 from vllm.inputs import PromptType
+from vllm.outputs import RequestOutput
 from vllm.utils import FlexibleArgumentParser
 
 CACHE_SIZE_PER_TOKEN = 131072 # Determined by the model
@@ -47,6 +48,21 @@ def stat_memory_now() -> tuple:
 
 def bytes_to_gb(bytes: int) -> float:
     return bytes / 1024 / 1024 / 1024
+
+
+def parse_output(output: RequestOutput) -> float:
+    """
+    Parse the output of a request.
+    """
+    metrics = output.metrics
+    arrival_time = metrics.arrival_time
+    first_scheduled_time = metrics.first_scheduled_time
+    first_token_time = metrics.first_token_time
+    ftt_fst = first_token_time - first_scheduled_time
+    ftt_arr = first_token_time - arrival_time
+    print(f"INFO >> First token time - Arrival time: {ftt_arr}")
+    print(f"INFO >> First token time - First scheduled time: {ftt_fst}")
+    return ftt_fst
 
 
 def generate_benchmark_dims() -> List[BenchmarkDim]:
@@ -116,90 +132,116 @@ def main(args: argparse.Namespace):
     else:
         benchmark_dimensions = generate_benchmark_dims()
 
-    for benchmark_dim in benchmark_dimensions:
+    pid = os.getpid()
+    csv_path = f"prefill_{pid}.csv"
 
-        # In this special debugging mode, the benchmark will only run once, with no chunk size optimization.
-        if benchmark_dim.max_seq_len != benchmark_dim.chunk_size:
-            continue
+    with open(csv_path, mode='a', newline='') as f:
 
-        print(f"INFO >> Running benchmark with dimension:")
-        print(f"INFO >> ===== {benchmark_dim} =====")
+        for benchmark_dim in benchmark_dimensions:
 
-        alogger = LoggingStatLogger(0.001)
-        logger_dict = {"logging": alogger}
+            # In this special debugging mode, the benchmark will only run once, with no chunk size optimization.
+            if benchmark_dim.max_seq_len != benchmark_dim.chunk_size:
+                continue
 
-        mem_aloc_init, mem_resv_init = stat_memory_now()
+            print(f"INFO >> Running benchmark with dimension:")
+            print(f"INFO >> ===== {benchmark_dim} =====")
 
-        engine_args = EngineArgs(
-            model=args.model,
-            disable_log_stats=False,
-            max_num_seqs=benchmark_dim.batch_size,
-            max_num_batched_tokens=benchmark_dim.chunk_size * benchmark_dim.batch_size,
-            preemption_mode=args.preemption_mode,
-            enable_chunked_prefill=True,
-        )
-        my_engine = LLMEngine.from_engine_args(engine_args=engine_args, stat_loggers=logger_dict) # For logger
+            alogger = LoggingStatLogger(0.001)
+            logger_dict = {"logging": alogger}
 
-        sampling_params = SamplingParams(temperature=0, max_tokens=benchmark_dim.max_seq_len)
+            mem_aloc_init, mem_resv_init = stat_memory_now()
 
-        mem_aloc_built, mem_resv_built = stat_memory_now()
-
-        print(f"INFO >> Creating {2 * benchmark_dim.batch_size} sequences of length {benchmark_dim.max_seq_len}...")
-        for i in range(2 * benchmark_dim.batch_size):
-            prompt_token_ids = TokensPrompt(prompt_token_ids=list(range(benchmark_dim.max_seq_len)))
-            my_engine.add_request(
-                request_id=str(i),
-                prompt=prompt_token_ids,
-                params=sampling_params,
+            engine_args = EngineArgs(
+                model=args.model,
+                disable_log_stats=False,
+                max_num_seqs=benchmark_dim.batch_size,
+                max_num_batched_tokens=benchmark_dim.chunk_size * benchmark_dim.batch_size,
+                preemption_mode=args.preemption_mode,
+                enable_chunked_prefill=True,
             )
+            my_engine = LLMEngine.from_engine_args(engine_args=engine_args, stat_loggers=logger_dict) # For logger
 
-        mem_aloc_filled, mem_resv_filled = stat_memory_now()
+            sampling_params = SamplingParams(temperature=0, max_tokens=benchmark_dim.max_seq_len)
 
-        print(f"INFO >> Warming up...")
-        my_engine.step()
+            mem_aloc_built, mem_resv_built = stat_memory_now()
 
-        mem_aloc_warm, mem_resv_warm = stat_memory_now()
+            print(f"INFO >> Creating {2 * benchmark_dim.batch_size} sequences of length {benchmark_dim.max_seq_len}...")
+            for i in range(2 * benchmark_dim.batch_size):
+                prompt_token_ids = TokensPrompt(prompt_token_ids=list(range(benchmark_dim.max_seq_len)))
+                my_engine.add_request(
+                    request_id=str(i),
+                    prompt=prompt_token_ids,
+                    params=sampling_params,
+                )
 
-        profile_dir = Path(".") / "vllm_benchmark_result" / f"benchmark_re_{benchmark_dim.max_seq_len}_{benchmark_dim.batch_size}_{benchmark_dim.chunk_size}_{time.time()}"
+            mem_aloc_filled, mem_resv_filled = stat_memory_now()
 
-        with torch.profiler.profile(
-                activities=[
-                    torch.profiler.ProfilerActivity.CPU,
-                    torch.profiler.ProfilerActivity.CUDA,
-                ],
-                profile_memory=True,
-                on_trace_ready=torch.profiler.tensorboard_trace_handler(str(profile_dir))
-        ) as p:
+            # print(f"INFO >> Warming up...")
+            # my_engine.step()
 
-            time_start = time.perf_counter_ns()
+            # mem_aloc_warm, mem_resv_warm = stat_memory_now()
 
-            outputs = my_engine.step()
+            profile_dir = Path(".") / "vllm_benchmark_result" / f"benchmark_re_{benchmark_dim.max_seq_len}_{benchmark_dim.batch_size}_{benchmark_dim.chunk_size}_{time.time()}"
 
-            time_end = time.perf_counter_ns()
-            mem_aloc_step, mem_resv_step = stat_memory_now()
+            with torch.profiler.profile(
+                    activities=[
+                        torch.profiler.ProfilerActivity.CPU,
+                        torch.profiler.ProfilerActivity.CUDA,
+                    ],
+                    profile_memory=True,
+                    on_trace_ready=torch.profiler.tensorboard_trace_handler(str(profile_dir))
+            ) as p:
 
-        latency = (time_end - time_start) / 1e6
+                time_start = time.perf_counter_ns()
 
-        del my_engine
-        gc.collect()
-        torch.cuda.empty_cache()
+                print(f"INFO >> Warming up...")
+                my_engine.step()
 
-        mem_aloc_clean, mem_resv_clean = stat_memory_now()
+                mem_aloc_warm, mem_resv_warm = stat_memory_now()
 
-        print(f"+==================== Benchmark completed ====================")
-        print(f"|===== Dimension: {benchmark_dim}")
-        print(f"|===== Latency: {latency} ms")
-        print(f"|===== Saved to {profile_dir}")
-        print(f"|===== Memory Usage:")
-        print(f"|===== + {'-' * 10} + {'Aloc':>5} + {'Resv':>5} +")
-        print(f"|===== | {'Init':<10} | {bytes_to_gb(mem_aloc_init):>5.2f} | {bytes_to_gb(mem_resv_init):>5.2f} |")
-        print(f"|===== | {'Built':<10} | {bytes_to_gb(mem_aloc_built):>5.2f} | {bytes_to_gb(mem_resv_built):>5.2f} |")
-        print(f"|===== | {'Filled':<10} | {bytes_to_gb(mem_aloc_filled):>5.2f} | {bytes_to_gb(mem_resv_filled):>5.2f} |")
-        print(f"|===== | {'Warm':<10} | {bytes_to_gb(mem_aloc_warm):>5.2f} | {bytes_to_gb(mem_resv_warm):>5.2f} |")
-        print(f"|===== | {'Step':<10} | {bytes_to_gb(mem_aloc_step):>5.2f} | {bytes_to_gb(mem_resv_step):>5.2f} |")
-        print(f"|===== | {'Clean':<10} | {bytes_to_gb(mem_aloc_clean):>5.2f} | {bytes_to_gb(mem_resv_clean):>5.2f} |")
-        print(f"|===== + {'-' * 10} + {'-' * 5} + {'GB':>5} +")
-        print(f"+=============================================================")
+                outputs = my_engine.step()
+
+                time_end = time.perf_counter_ns()
+                mem_aloc_step, mem_resv_step = stat_memory_now()
+
+                prefill_t = parse_output(outputs[0])
+
+            latency = (time_end - time_start) / 1e9
+
+            del my_engine
+            gc.collect()
+            torch.cuda.empty_cache()
+
+            mem_aloc_clean, mem_resv_clean = stat_memory_now()
+
+            print(f"+==================== Benchmark completed ====================")
+            print(f"|===== Dimension: {benchmark_dim}")
+            print(f"|===== Latency: {latency} ms")
+            print(f"|===== Saved to {profile_dir}")
+            print(f"|===== Memory Usage:")
+            print(f"|===== + {'-' * 10} + {'Aloc':>5} + {'Resv':>5} +")
+            print(f"|===== | {'Init':<10} | {bytes_to_gb(mem_aloc_init):>5.2f} | {bytes_to_gb(mem_resv_init):>5.2f} |")
+            print(f"|===== | {'Built':<10} | {bytes_to_gb(mem_aloc_built):>5.2f} | {bytes_to_gb(mem_resv_built):>5.2f} |")
+            print(f"|===== | {'Filled':<10} | {bytes_to_gb(mem_aloc_filled):>5.2f} | {bytes_to_gb(mem_resv_filled):>5.2f} |")
+            print(f"|===== | {'Warm':<10} | {bytes_to_gb(mem_aloc_warm):>5.2f} | {bytes_to_gb(mem_resv_warm):>5.2f} |")
+            print(f"|===== | {'Step':<10} | {bytes_to_gb(mem_aloc_step):>5.2f} | {bytes_to_gb(mem_resv_step):>5.2f} |")
+            print(f"|===== | {'Clean':<10} | {bytes_to_gb(mem_aloc_clean):>5.2f} | {bytes_to_gb(mem_resv_clean):>5.2f} |")
+            print(f"|===== + {'-' * 10} + {'-' * 5} + {'GB':>5} +")
+            print(f"+=============================================================")
+
+            benchmark_result = {
+                'max_seq_len': benchmark_dim.max_seq_len,
+                'batch_size': benchmark_dim.batch_size,
+                'chunk_size': benchmark_dim.chunk_size,
+                'latency_sec': latency,
+                'computed_prefill_sec': prefill_t,
+            }
+            df = pd.DataFrame([benchmark_result])
+            if f.tell() == 0:
+                df.to_csv(f, index=False)
+            else:
+                df.to_csv(f, header=False, index=False)
+            f.flush()
 
 
 if __name__ == '__main__':
