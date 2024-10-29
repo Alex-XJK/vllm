@@ -146,7 +146,7 @@ def main(args: argparse.Namespace):
             print(f"INFO >> Running benchmark with dimension:")
             print(f"INFO >> ===== {benchmark_dim} =====")
 
-            alogger = LoggingStatLogger(0.001)
+            alogger = LoggingStatLogger(0.01)
             logger_dict = {"logging": alogger}
 
             mem_aloc_init, mem_resv_init = stat_memory_now()
@@ -159,7 +159,7 @@ def main(args: argparse.Namespace):
                 preemption_mode=args.preemption_mode,
                 enable_chunked_prefill=True,
             )
-            my_engine = LLMEngine.from_engine_args(engine_args=engine_args, stat_loggers=logger_dict) # For logger
+            my_engine = LLMEngine.from_engine_args(engine_args=engine_args, stat_loggers=logger_dict)
 
             sampling_params = SamplingParams(temperature=0, max_tokens=benchmark_dim.max_seq_len)
 
@@ -176,37 +176,20 @@ def main(args: argparse.Namespace):
 
             mem_aloc_filled, mem_resv_filled = stat_memory_now()
 
-            # print(f"INFO >> Warming up...")
-            # my_engine.step()
+            time_start = time.perf_counter_ns()
 
-            # mem_aloc_warm, mem_resv_warm = stat_memory_now()
+            print(f"INFO >> Warming up...")
+            my_engine.step()
 
-            profile_dir = Path(".") / "vllm_benchmark_result" / f"benchmark_re_{benchmark_dim.max_seq_len}_{benchmark_dim.batch_size}_{benchmark_dim.chunk_size}_{time.time()}"
+            time_mid = time.perf_counter_ns()
 
-            with torch.profiler.profile(
-                    activities=[
-                        torch.profiler.ProfilerActivity.CPU,
-                        torch.profiler.ProfilerActivity.CUDA,
-                    ],
-                    profile_memory=True,
-                    on_trace_ready=torch.profiler.tensorboard_trace_handler(str(profile_dir))
-            ) as p:
+            print(f"INFO >> Running step...")
+            outputs = my_engine.step()
 
-                time_start = time.perf_counter_ns()
+            time_end = time.perf_counter_ns()
+            mem_aloc_step, mem_resv_step = stat_memory_now()
 
-                print(f"INFO >> Warming up...")
-                my_engine.step()
-
-                mem_aloc_warm, mem_resv_warm = stat_memory_now()
-
-                outputs = my_engine.step()
-
-                time_end = time.perf_counter_ns()
-                mem_aloc_step, mem_resv_step = stat_memory_now()
-
-                prefill_t = parse_output(outputs[0])
-
-            latency = (time_end - time_start) / 1e9
+            prefill_t = parse_output(outputs[0])
 
             del my_engine
             gc.collect()
@@ -214,16 +197,19 @@ def main(args: argparse.Namespace):
 
             mem_aloc_clean, mem_resv_clean = stat_memory_now()
 
+            latency = (time_end - time_start) / 1e9
+            period_1 = (time_mid - time_start) / 1e9
+            period_2 = (time_end - time_mid) / 1e9
+
             print(f"+==================== Benchmark completed ====================")
             print(f"|===== Dimension: {benchmark_dim}")
-            print(f"|===== Latency: {latency} ms")
-            print(f"|===== Saved to {profile_dir}")
+            print(f"|===== Latency (timer): {latency:.6f} s (1st Step: {period_1:.4f} s, 2nd Token: {period_2:.4f} s)")
+            print(f"|===== Latency (computed): {prefill_t:.6f} s")
             print(f"|===== Memory Usage:")
             print(f"|===== + {'-' * 10} + {'Aloc':>5} + {'Resv':>5} +")
             print(f"|===== | {'Init':<10} | {bytes_to_gb(mem_aloc_init):>5.2f} | {bytes_to_gb(mem_resv_init):>5.2f} |")
             print(f"|===== | {'Built':<10} | {bytes_to_gb(mem_aloc_built):>5.2f} | {bytes_to_gb(mem_resv_built):>5.2f} |")
             print(f"|===== | {'Filled':<10} | {bytes_to_gb(mem_aloc_filled):>5.2f} | {bytes_to_gb(mem_resv_filled):>5.2f} |")
-            print(f"|===== | {'Warm':<10} | {bytes_to_gb(mem_aloc_warm):>5.2f} | {bytes_to_gb(mem_resv_warm):>5.2f} |")
             print(f"|===== | {'Step':<10} | {bytes_to_gb(mem_aloc_step):>5.2f} | {bytes_to_gb(mem_resv_step):>5.2f} |")
             print(f"|===== | {'Clean':<10} | {bytes_to_gb(mem_aloc_clean):>5.2f} | {bytes_to_gb(mem_resv_clean):>5.2f} |")
             print(f"|===== + {'-' * 10} + {'-' * 5} + {'GB':>5} +")
