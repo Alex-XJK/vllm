@@ -221,6 +221,8 @@ def main(args: argparse.Namespace):
                 'chunk_size': benchmark_dim.chunk_size,
                 'latency_sec': latency,
                 'computed_prefill_sec': prefill_t,
+                '1st_period_sec': period_1,
+                '2nd_period_sec': period_2,
             }
             df = pd.DataFrame([benchmark_result])
             if f.tell() == 0:
