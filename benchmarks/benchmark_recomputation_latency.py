@@ -176,9 +176,8 @@ def main(args: argparse.Namespace):
 
         for benchmark_dim in benchmark_dimensions:
 
-            # # In this special debugging mode, the benchmark will only run once, with no chunk size optimization.
-            # if benchmark_dim.max_seq_len != benchmark_dim.chunk_size:
-            #     continue
+            assert benchmark_dim.max_seq_len % benchmark_dim.chunk_size == 0
+            num_chunked_prefill_iters = benchmark_dim.max_seq_len // benchmark_dim.chunk_size
 
             print(f"INFO >> Running benchmark with dimension:")
             print(f"INFO >> ===== {benchmark_dim} =====")
