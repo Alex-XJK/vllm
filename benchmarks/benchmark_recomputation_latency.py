@@ -203,6 +203,7 @@ def main(args: argparse.Namespace):
             mem_aloc_built, mem_resv_built = stat_memory_now()
 
             print(f"INFO >> Creating {2 * benchmark_dim.batch_size} sequences of length {benchmark_dim.max_seq_len}...")
+            time_p0_s = time.perf_counter_ns()
             for i in range(2 * benchmark_dim.batch_size):
                 prompt_token_ids = TokensPrompt(prompt_token_ids=list(range(benchmark_dim.max_seq_len)))
                 my_engine.add_request(
@@ -210,20 +211,20 @@ def main(args: argparse.Namespace):
                     prompt=prompt_token_ids,
                     params=sampling_params,
                 )
+            time_p0_e = time.perf_counter_ns()
 
             mem_aloc_filled, mem_resv_filled = stat_memory_now()
 
-            time_start = time.perf_counter_ns()
-
             print(f"INFO >> Warming up...")
+            time_p1_s = time.perf_counter_ns()
             my_engine.step()
-
-            time_mid = time.perf_counter_ns()
+            time_p1_e = time.perf_counter_ns()
 
             print(f"INFO >> Running step...")
+            time_p2_s = time.perf_counter_ns()
             outputs = my_engine.step()
+            time_p2_e = time.perf_counter_ns()
 
-            time_end = time.perf_counter_ns()
             mem_aloc_step, mem_resv_step = stat_memory_now()
 
             print(f"INFO >> {len(outputs)} outputs received.")
@@ -235,13 +236,13 @@ def main(args: argparse.Namespace):
 
             mem_aloc_clean, mem_resv_clean = stat_memory_now()
 
-            latency = (time_end - time_start) / 1e9
-            period_1 = (time_mid - time_start) / 1e9
-            period_2 = (time_end - time_mid) / 1e9
+            p0_time = (time_p0_e - time_p0_s) / 1e9
+            p1_time = (time_p1_e - time_p1_s) / 1e9
+            p2_time = (time_p2_e - time_p2_s) / 1e9
 
             print(f"+==================== Benchmark completed ====================")
             print(f"|===== Dimension: {benchmark_dim}")
-            print(f"|===== Latency (timer): {latency:.6f} s (1st Step: {period_1:.4f} s, 2nd Token: {period_2:.4f} s)")
+            print(f"|===== Latency (timer): p0 {p0_time:.6f} s, p1 {p1_time:.6f} s, p2 {p2_time:.6f} s")
             print(f"|===== Latency (computed): {prefill_t:.6f} s")
             print(f"|===== Memory Usage:")
             print(f"|===== + {'-' * 10} + {'Aloc':>5} + {'Resv':>5} +")
@@ -257,10 +258,10 @@ def main(args: argparse.Namespace):
                 'max_seq_len': benchmark_dim.max_seq_len,
                 'batch_size': benchmark_dim.batch_size,
                 'chunk_size': benchmark_dim.chunk_size,
-                'latency_sec': latency,
                 'computed_prefill_sec': prefill_t,
-                '1st_period_sec': period_1,
-                '2nd_period_sec': period_2,
+                'p0_time_sec': p0_time,
+                'p1_time_sec': p1_time,
+                'p2_time_sec': p2_time,
             }
             df = pd.DataFrame([benchmark_result])
             if f.tell() == 0:
