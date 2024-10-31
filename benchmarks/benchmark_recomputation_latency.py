@@ -14,6 +14,7 @@ from typing import List, Optional
 import numpy as np
 import pandas as pd
 import torch
+import sys
 from tqdm import tqdm
 
 from vllm import SamplingParams, LLMEngine, TokensPrompt
@@ -125,6 +126,38 @@ def config_global(args: argparse.Namespace):
     CACHE_SIZE_PER_TOKEN = args.cache_size_per_token
 
 
+def warmup_device(args: argparse.Namespace, num_warmup: int = 5):
+    """
+    Warm up the device by allocating and deallocating memory.
+    """
+    if not torch.cuda.is_available():
+        print(f"ERROR >> CUDA is not available.")
+        return
+
+    device_name = torch.cuda.get_device_name()
+    print(f"INFO >> Warming up {device_name}...")
+    for _ in tqdm(range(num_warmup), desc="Warming up CUDA"):
+        torch.ones(1).cuda()
+        torch.cuda.empty_cache()
+
+    for i in tqdm(range(num_warmup), desc="Warming up LLMEngine"):
+        warmup_engine = LLMEngine.from_engine_args(
+            engine_args=EngineArgs(model=args.model),
+        )
+        warmup_engine.add_request(
+            request_id=str(i),
+            prompt=TokensPrompt(prompt_token_ids=list(range(256))),
+            params=SamplingParams(temperature=0, max_tokens=256),
+        )
+        warmup_engine.step()
+        warmup_engine.abort_request(str(i))
+        del warmup_engine
+        torch.cuda.empty_cache()
+
+    gc.collect()
+    print(f"INFO >> Warmup completed.")
+
+
 def main(args: argparse.Namespace):
 
     config_global(args)
@@ -133,6 +166,8 @@ def main(args: argparse.Namespace):
         benchmark_dimensions = manual_benchmark_dims(args.manual)
     else:
         benchmark_dimensions = generate_benchmark_dims()
+
+    warmup_device(args)
 
     pid = os.getpid()
     csv_path = f"prefill_{pid}.csv"
