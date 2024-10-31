@@ -56,11 +56,13 @@ def parse_output(output: RequestOutput) -> float:
     """
     metrics = output.metrics
     arrival_time = metrics.arrival_time
-    first_scheduled_time = metrics.first_scheduled_time
-    first_token_time = metrics.first_token_time
+    first_scheduled_time = metrics.first_scheduled_time if metrics.first_scheduled_time is not None else 0
+    first_token_time = metrics.first_token_time if metrics.first_token_time is not None else 0
     ftt_fst = first_token_time - first_scheduled_time
+    ftt_fst = ftt_fst if ftt_fst > 0 else 0
     ftt_arr = first_token_time - arrival_time
-    print(f"INFO >> First token time - Arrival time: {ftt_arr}")
+    ftt_arr = ftt_arr if ftt_arr > 0 else 0
+    print(f"INFO >> TTFT: {ftt_arr}")
     print(f"INFO >> First token time - First scheduled time: {ftt_fst}")
     return ftt_fst
 
@@ -139,9 +141,9 @@ def main(args: argparse.Namespace):
 
         for benchmark_dim in benchmark_dimensions:
 
-            # In this special debugging mode, the benchmark will only run once, with no chunk size optimization.
-            if benchmark_dim.max_seq_len != benchmark_dim.chunk_size:
-                continue
+            # # In this special debugging mode, the benchmark will only run once, with no chunk size optimization.
+            # if benchmark_dim.max_seq_len != benchmark_dim.chunk_size:
+            #     continue
 
             print(f"INFO >> Running benchmark with dimension:")
             print(f"INFO >> ===== {benchmark_dim} =====")
@@ -189,6 +191,7 @@ def main(args: argparse.Namespace):
             time_end = time.perf_counter_ns()
             mem_aloc_step, mem_resv_step = stat_memory_now()
 
+            print(f"INFO >> {len(outputs)} outputs received.")
             prefill_t = parse_output(outputs[0])
 
             del my_engine
