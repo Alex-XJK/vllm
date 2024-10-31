@@ -214,15 +214,26 @@ def main(args: argparse.Namespace):
 
             mem_aloc_filled, mem_resv_filled = stat_memory_now()
 
-            print(f"INFO >> Warming up...")
+            print(f"INFO >> Before 1st Step...")
+            my_engine.do_log_stats()
+
+            print(f"INFO >> Running 1st Step...")
             time_p1_s = time.perf_counter_ns()
-            my_engine.step()
+            for i in range(num_chunked_prefill_iters):
+                my_engine.step()
             time_p1_e = time.perf_counter_ns()
 
-            print(f"INFO >> Running step...")
+            print(f"INFO >> After 1st Step...")
+            my_engine.do_log_stats()
+
+            print(f"INFO >> Running 2nd Step...")
             time_p2_s = time.perf_counter_ns()
-            outputs = my_engine.step()
+            for i in range(num_chunked_prefill_iters):
+                outputs = my_engine.step()
             time_p2_e = time.perf_counter_ns()
+
+            print(f"INFO >> After 2nd Step...")
+            my_engine.do_log_stats()
 
             mem_aloc_step, mem_resv_step = stat_memory_now()
 
