@@ -211,7 +211,7 @@ def main(args: argparse.Namespace):
             print(f"INFO >> Running benchmark with dimension:")
             print(f"INFO >> ===== {benchmark_dim} =====")
 
-            alogger = LoggingStatLogger(0.01)
+            alogger = KvLogger(0.01)
             logger_dict = {"logging": alogger}
 
             mem_aloc_init, mem_resv_init = stat_memory_now()
@@ -250,6 +250,7 @@ def main(args: argparse.Namespace):
             time_p1_s = time.perf_counter_ns()
             for i in range(num_chunked_prefill_iters):
                 my_engine.step()
+                my_engine.do_log_stats()
             time_p1_e = time.perf_counter_ns()
 
             print(f"INFO >> After 1st Step...")
@@ -259,6 +260,7 @@ def main(args: argparse.Namespace):
             time_p2_s = time.perf_counter_ns()
             for i in range(num_chunked_prefill_iters):
                 outputs = my_engine.step()
+                my_engine.do_log_stats()
             time_p2_e = time.perf_counter_ns()
 
             print(f"INFO >> After 2nd Step...")
@@ -278,6 +280,10 @@ def main(args: argparse.Namespace):
             p0_time = (time_p0_e - time_p0_s) / 1e9
             p1_time = (time_p1_e - time_p1_s) / 1e9
             p2_time = (time_p2_e - time_p2_s) / 1e9
+
+            gpu_usage, cpu_usage = alogger.get_kvcache_usage()
+            for i, usage in enumerate(gpu_usage):
+                print(f"DEBUG >> GPU Cache Usage {i}: {usage:.10f}")
 
             print(f"+==================== Benchmark completed ====================")
             print(f"|===== Dimension: {benchmark_dim}")
