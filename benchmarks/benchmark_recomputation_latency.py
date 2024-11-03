@@ -20,6 +20,7 @@ from tqdm import tqdm
 from vllm import SamplingParams, LLMEngine, TokensPrompt
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.metrics import LoggingStatLogger, PrometheusStatLogger
+from vllm.engine.metrics_types import StatLoggerBase, Stats, SupportsMetricsInfo
 from vllm.inputs import PromptType
 from vllm.outputs import RequestOutput
 from vllm.utils import FlexibleArgumentParser
@@ -29,6 +30,34 @@ CHUNK_SIZE_LOG_MIN = 8 # Arbitrary
 TOKEN_SIZE_LOG_MIN = 8 # Arbitrary, but should be at least chunk size min
 TOKEN_SIZE_LOG_MAX = 17  # Determined by number of GPU blocks (~ GPU HBM size).
 MAX_MODEL_TOKENS = 65536 # Should have been 131072 but we truncate to 65536 otherwise it throws a CUDA error
+
+class KvLogger(StatLoggerBase):
+
+    def __init__(self, local_interval: float) -> None:
+        super().__init__(local_interval)
+        self.GPU_CACHE_USAGE = []
+        self.CPU_CACHE_USAGE = []
+
+    def log(self, stats: Stats) -> None:
+        """Called by LLMEngine.
+           Logs to Stdout every self.local_interval seconds."""
+
+        if stats.now > self.last_local_log + self.local_interval:
+            print(f"KvLogger >> CPU KV Cache: {stats.cpu_cache_usage_sys * 100:.6f}")
+            print(f"KvLogger >> GPU KV Cache: {stats.gpu_cache_usage_sys * 100:.6f}")
+            self.last_local_log = stats.now
+            self.GPU_CACHE_USAGE.append(stats.gpu_cache_usage_sys)
+            self.CPU_CACHE_USAGE.append(stats.cpu_cache_usage_sys)
+
+    def get_kvcache_usage(self):
+        """
+        Get the KV cache usage, in the format of (GPU, CPU).
+        """
+        return self.GPU_CACHE_USAGE, self.CPU_CACHE_USAGE
+
+    def info(self, type: str, obj: SupportsMetricsInfo) -> None:
+        raise NotImplementedError
+
 
 @dataclass
 class BenchmarkDim:
