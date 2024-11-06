@@ -50,7 +50,8 @@ def plot_prefill_latency(args, N=None):
             print(f"No categories found where max_seq_len * batch_size = {N}")
             return
 
-    unique_categories = data[['max_seq_len', 'batch_size']].drop_duplicates()
+    grouped_data = data.groupby(['max_seq_len', 'batch_size', 'chunk_size'], as_index=False)['p1_time_sec'].mean()
+    unique_categories = grouped_data[['max_seq_len', 'batch_size']].drop_duplicates()
 
     plt.figure(figsize=(10, 6))
     for _, row in unique_categories.iterrows():
@@ -86,4 +87,4 @@ if __name__ == '__main__':
     args = parser.parse_args()
     # plot_latency(args)
     # plot_periodic_latency(args)
-    plot_prefill_latency(args, N=2048)
+    plot_prefill_latency(args, N=16384)
