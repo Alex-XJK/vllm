@@ -2,26 +2,20 @@
 Benchmark the re-computation latency of processing a single batch of requests.
 Author: Alex
 """
-import gc
-import os
 import argparse
+import gc
 import math
-import time
-from dataclasses import dataclass
-from pathlib import Path
-from typing import List, Optional
-
-import numpy as np
+import os
 import pandas as pd
+import time
 import torch
-import sys
+
+from dataclasses import dataclass
 from tqdm import tqdm
+from typing import List
 
 from vllm import SamplingParams, LLMEngine, TokensPrompt
 from vllm.engine.arg_utils import EngineArgs
-from vllm.engine.metrics import LoggingStatLogger, PrometheusStatLogger
-from vllm.inputs import PromptType
-from vllm.outputs import RequestOutput
 from vllm.utils import FlexibleArgumentParser
 
 CACHE_SIZE_PER_TOKEN = 131072 # Determined by the model
@@ -38,34 +32,6 @@ class BenchmarkDim:
 
     def __str__(self):
         return f"max_seq_len={self.max_seq_len}, batch_size={self.batch_size}, chunk_size={self.chunk_size}"
-
-
-def stat_memory_now() -> tuple:
-    """
-    Get the current CUDA memory usage of allocated and reserved memory in bytes.
-    """
-    return torch.cuda.memory_allocated(), torch.cuda.memory_reserved()
-
-
-def bytes_to_gb(bytes: int) -> float:
-    return bytes / 1024 / 1024 / 1024
-
-
-def parse_output(output: RequestOutput) -> float:
-    """
-    Parse the output of a request.
-    """
-    metrics = output.metrics
-    arrival_time = metrics.arrival_time
-    first_scheduled_time = metrics.first_scheduled_time if metrics.first_scheduled_time is not None else 0
-    first_token_time = metrics.first_token_time if metrics.first_token_time is not None else 0
-    ftt_fst = first_token_time - first_scheduled_time
-    ftt_fst = ftt_fst if ftt_fst > 0 else 0
-    ftt_arr = first_token_time - arrival_time
-    ftt_arr = ftt_arr if ftt_arr > 0 else 0
-    print(f"INFO >> TTFT: {ftt_arr}")
-    print(f"INFO >> First token time - First scheduled time: {ftt_fst}")
-    return ftt_fst
 
 
 def generate_benchmark_dims() -> List[BenchmarkDim]:
@@ -176,16 +142,16 @@ def main(args: argparse.Namespace):
 
         for benchmark_dim in benchmark_dimensions:
 
+            if benchmark_dim.max_seq_len * benchmark_dim.batch_size > MAX_MODEL_TOKENS:
+                print(f"WARN >> Skipping {benchmark_dim} due to exceeding the maximum token limit.")
+                continue
+
             assert benchmark_dim.max_seq_len % benchmark_dim.chunk_size == 0
             num_chunked_prefill_iters = benchmark_dim.max_seq_len // benchmark_dim.chunk_size
 
             print(f"INFO >> Running benchmark with dimension:")
             print(f"INFO >> ===== {benchmark_dim} =====")
-
-            alogger = LoggingStatLogger(0.01)
-            logger_dict = {"logging": alogger}
-
-            mem_aloc_init, mem_resv_init = stat_memory_now()
+            print(f"INFO >> ===== Chunked Prefill Iterations: {num_chunked_prefill_iters} =====")
 
             engine_args = EngineArgs(
                 model=args.model,
@@ -195,15 +161,13 @@ def main(args: argparse.Namespace):
                 preemption_mode=args.preemption_mode,
                 enable_chunked_prefill=True,
             )
-            my_engine = LLMEngine.from_engine_args(engine_args=engine_args, stat_loggers=logger_dict)
+            my_engine = LLMEngine.from_engine_args(engine_args=engine_args)
 
             sampling_params = SamplingParams(temperature=0, max_tokens=benchmark_dim.max_seq_len)
 
-            mem_aloc_built, mem_resv_built = stat_memory_now()
-
-            print(f"INFO >> Creating {2 * benchmark_dim.batch_size} sequences of length {benchmark_dim.max_seq_len}...")
+            print(f"INFO >> Creating {benchmark_dim.batch_size} sequences of length {benchmark_dim.max_seq_len}...")
             time_p0_s = time.perf_counter_ns()
-            for i in range(2 * benchmark_dim.batch_size):
+            for i in range(benchmark_dim.batch_size):
                 prompt_token_ids = TokensPrompt(prompt_token_ids=list(range(benchmark_dim.max_seq_len)))
                 my_engine.add_request(
                     request_id=str(i),
@@ -212,39 +176,22 @@ def main(args: argparse.Namespace):
                 )
             time_p0_e = time.perf_counter_ns()
 
-            mem_aloc_filled, mem_resv_filled = stat_memory_now()
-
-            print(f"INFO >> Before 1st Step...")
-            my_engine.do_log_stats()
-
-            print(f"INFO >> Running 1st Step...")
+            print(f"INFO >> Running 1st Step * {num_chunked_prefill_iters}...")
             time_p1_s = time.perf_counter_ns()
             for i in range(num_chunked_prefill_iters):
                 my_engine.step()
             time_p1_e = time.perf_counter_ns()
 
-            print(f"INFO >> After 1st Step...")
-            my_engine.do_log_stats()
-
             print(f"INFO >> Running 2nd Step...")
             time_p2_s = time.perf_counter_ns()
-            for i in range(num_chunked_prefill_iters):
-                outputs = my_engine.step()
+            outputs = my_engine.step()
             time_p2_e = time.perf_counter_ns()
 
-            print(f"INFO >> After 2nd Step...")
-            my_engine.do_log_stats()
-
-            mem_aloc_step, mem_resv_step = stat_memory_now()
-
             print(f"INFO >> {len(outputs)} outputs received.")
-            prefill_t = parse_output(outputs[0])
 
             del my_engine
             gc.collect()
             torch.cuda.empty_cache()
-
-            mem_aloc_clean, mem_resv_clean = stat_memory_now()
 
             p0_time = (time_p0_e - time_p0_s) / 1e9
             p1_time = (time_p1_e - time_p1_s) / 1e9
@@ -252,23 +199,15 @@ def main(args: argparse.Namespace):
 
             print(f"+==================== Benchmark completed ====================")
             print(f"|===== Dimension: {benchmark_dim}")
-            print(f"|===== Latency (timer): p0 {p0_time:.6f} s, p1 {p1_time:.6f} s, p2 {p2_time:.6f} s")
-            print(f"|===== Latency (computed): {prefill_t:.6f} s")
-            print(f"|===== Memory Usage:")
-            print(f"|===== + {'-' * 10} + {'Aloc':>5} + {'Resv':>5} +")
-            print(f"|===== | {'Init':<10} | {bytes_to_gb(mem_aloc_init):>5.2f} | {bytes_to_gb(mem_resv_init):>5.2f} |")
-            print(f"|===== | {'Built':<10} | {bytes_to_gb(mem_aloc_built):>5.2f} | {bytes_to_gb(mem_resv_built):>5.2f} |")
-            print(f"|===== | {'Filled':<10} | {bytes_to_gb(mem_aloc_filled):>5.2f} | {bytes_to_gb(mem_resv_filled):>5.2f} |")
-            print(f"|===== | {'Step':<10} | {bytes_to_gb(mem_aloc_step):>5.2f} | {bytes_to_gb(mem_resv_step):>5.2f} |")
-            print(f"|===== | {'Clean':<10} | {bytes_to_gb(mem_aloc_clean):>5.2f} | {bytes_to_gb(mem_resv_clean):>5.2f} |")
-            print(f"|===== + {'-' * 10} + {'-' * 5} + {'GB':>5} +")
+            print(f"|===== Latency P0: {p0_time:.4f} sec (add_request)")
+            print(f"|===== Latency P1: {p1_time:.4f} sec (prefill)")
+            print(f"|===== Latency P2: {p2_time:.4f} sec (1st decode step)")
             print(f"+=============================================================")
 
             benchmark_result = {
                 'max_seq_len': benchmark_dim.max_seq_len,
                 'batch_size': benchmark_dim.batch_size,
                 'chunk_size': benchmark_dim.chunk_size,
-                'computed_prefill_sec': prefill_t,
                 'p0_time_sec': p0_time,
                 'p1_time_sec': p1_time,
                 'p2_time_sec': p2_time,
