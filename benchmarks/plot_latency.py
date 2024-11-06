@@ -39,6 +39,34 @@ def plot_periodic_latency(args):
     plt.savefig(f"{args.out}_periods.png")
 
 
+def plot_gpu_usage(args):
+    data = pd.read_csv(args.csv)
+    data['time'] = pd.to_datetime(data['time'])
+    data['time_diff'] = (data['time'] - data['time'].iloc[0]).dt.total_seconds()
+
+    plt.figure(figsize=(10, 6))
+
+    plt.plot(data.index, data['gpu_usage'], color='gray', linestyle='-', label='GPU Usage')
+
+    # Unique remarks for color coding
+    unique_remarks = data['remark'].unique()
+    colors = plt.cm.tab10(range(len(unique_remarks)))  # Generate distinct colors for each remark
+
+    for i, remark in enumerate(unique_remarks):
+        filtered_data = data[data['remark'] == remark]
+        plt.plot(filtered_data.index, filtered_data['gpu_usage'], label=f'Remark: {remark}', color=colors[i])
+        plt.scatter(filtered_data.index, filtered_data['gpu_usage'], color=colors[i], s=50,
+                    label=f'Data Points ({remark})')
+
+    # Labels and legend
+    plt.xlabel('Step')
+    plt.ylabel('GPU Usage')
+    plt.title('GPU KV-cache Usage Over Time')
+    plt.legend()
+
+    plt.savefig(f"{args.out}_kvcache.png")
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Visualize the latency.')
     parser.add_argument('--csv',
@@ -49,5 +77,6 @@ if __name__ == '__main__':
                         default='latency_results',
                         help='Output file label.')
     args = parser.parse_args()
-    plot_latency(args)
-    plot_periodic_latency(args)
+    # plot_latency(args)
+    # plot_periodic_latency(args)
+    plot_gpu_usage(args)
