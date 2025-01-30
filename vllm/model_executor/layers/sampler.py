@@ -4,13 +4,14 @@ import warnings
 from dataclasses import dataclass
 from importlib.util import find_spec
 from math import inf
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, Iterator, List, Optional, Tuple, Union
 
 import msgspec
 import torch
 import torch.nn as nn
 
 import vllm.envs as envs
+from vllm.model_executor.layers.utils import apply_penalties
 from vllm.model_executor.sampling_metadata import (SamplingMetadata,
                                                    SamplingTensors,
                                                    SequenceGroupToSample)
@@ -29,6 +30,15 @@ if envs.VLLM_USE_FLASHINFER_SAMPLER and find_spec("flashinfer"):
     # yapf: enable
 else:
     flashinfer_top_k_top_p_sampling = None
+
+
+def get_sampler() -> torch.nn.Module:
+    if envs.VLLM_USE_V1:
+        # Lazy import: the v1 package isn't distributed
+        from vllm.v1.sample.sampler import Sampler as V1Sampler
+        return V1Sampler()
+    return Sampler()
+
 
 # (num_token_ids, num_parent_ids) per sequence group.
 SampleResultType = List[Tuple[List[int], List[int]]]
@@ -117,11 +127,14 @@ class SamplerOutput(
     # block/sync across workers, cpu-gpu sync time and sampling time.
     model_execute_time: Optional[float] = None
 
-    def __getitem__(self, idx: int):
+    def __getitem__(self, idx: int) -> CompletionSequenceGroupOutput:
         return self.outputs[idx]
 
     def __setitem__(self, idx: int, value):
         self.outputs[idx] = value
+
+    def __iter__(self) -> Iterator[CompletionSequenceGroupOutput]:
+        return iter(self.outputs)
 
     def __len__(self):
         return len(self.outputs)
@@ -246,11 +259,11 @@ class Sampler(nn.Module):
 
         # Apply presence and frequency penalties.
         if do_penalties:
-            logits = _apply_penalties(logits, sampling_tensors.prompt_tokens,
-                                      sampling_tensors.output_tokens,
-                                      sampling_tensors.presence_penalties,
-                                      sampling_tensors.frequency_penalties,
-                                      sampling_tensors.repetition_penalties)
+            logits = apply_penalties(logits, sampling_tensors.prompt_tokens,
+                                     sampling_tensors.output_tokens,
+                                     sampling_tensors.presence_penalties,
+                                     sampling_tensors.frequency_penalties,
+                                     sampling_tensors.repetition_penalties)
 
         # Use float32 to apply temperature scaling.
         # Use in-place division to avoid creating a new tensor.
@@ -324,23 +337,6 @@ class Sampler(nn.Module):
         return self.should_modify_greedy_probs_inplace
 
 
-def _get_bin_counts_and_mask(
-    tokens: torch.Tensor,
-    vocab_size: int,
-    num_seqs: int,
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    # Compute the bin counts for the tokens.
-    # vocab_size + 1 for padding.
-    bin_counts = torch.zeros((num_seqs, vocab_size + 1),
-                             dtype=torch.long,
-                             device=tokens.device)
-    bin_counts.scatter_add_(1, tokens, torch.ones_like(tokens))
-    bin_counts = bin_counts[:, :vocab_size]
-    mask = bin_counts > 0
-
-    return bin_counts, mask
-
-
 def _apply_min_tokens_penalty(
     logits: torch.Tensor,
     sampling_metadata: SamplingMetadata,
@@ -385,29 +381,6 @@ def _apply_min_tokens_penalty(
 
     # verifies that no rows in logits were missed unexpectedly
     assert logits_applied == logits.shape[0]
-    return logits
-
-
-def _apply_penalties(logits: torch.Tensor, prompt_tokens_tensor: torch.Tensor,
-                     output_tokens_tensor: torch.Tensor,
-                     presence_penalties: torch.Tensor,
-                     frequency_penalties: torch.Tensor,
-                     repetition_penalties: torch.Tensor) -> torch.Tensor:
-    num_seqs, vocab_size = logits.shape
-    _, prompt_mask = _get_bin_counts_and_mask(prompt_tokens_tensor, vocab_size,
-                                              num_seqs)
-    output_bin_counts, output_mask = _get_bin_counts_and_mask(
-        output_tokens_tensor, vocab_size, num_seqs)
-
-    repetition_penalties = repetition_penalties[:, None].repeat(1, vocab_size)
-    repetition_penalties[~(prompt_mask | output_mask)] = 1.0
-    logits = torch.where(logits > 0, logits / repetition_penalties,
-                         logits * repetition_penalties)
-
-    # We follow the definition in OpenAI API.
-    # Refer to https://platform.openai.com/docs/api-reference/parameter-details
-    logits -= frequency_penalties.unsqueeze_(dim=1) * output_bin_counts
-    logits -= presence_penalties.unsqueeze_(dim=1) * output_mask
     return logits
 
 
@@ -508,7 +481,7 @@ def _random_sample(
         same as the length of selected_seq_groups. If the corresponding
         seq_group has do_sample=False, tuple contains ([], [])
     """
-    # Find the maximum best_of value of the prompt phase requests.
+    # Find the maximum n value of the prompt phase requests.
     random_samples = random_samples.cpu()
     sample_idx = 0
     results: SampleResultType = []
@@ -523,9 +496,9 @@ def _random_sample(
         num_parent_seqs = len(seq_ids)
         if is_prompt:
             # Prompt phase.
-            parent_ids = [0] * sampling_params.best_of
+            parent_ids = [0] * sampling_params.n
             next_token_ids = random_samples[
-                sample_idx, :sampling_params.best_of].tolist()
+                sample_idx, :sampling_params.n].tolist()
         else:
             # Generation phase.
             parent_ids = list(range(num_parent_seqs))
@@ -570,7 +543,7 @@ def _beam_search_sample(
         is_prompt = seq_group.is_prompt
         seq_ids, sampling_params = seq_group.seq_ids, seq_group.sampling_params
         num_parent_seqs = len(seq_ids)
-        beam_width = sampling_params.best_of
+        beam_width = sampling_params.n
         seq_group_logprobs = logprobs[sample_idx:sample_idx + num_parent_seqs]
         if is_prompt:
             # Prompt phase.
@@ -743,9 +716,10 @@ def _sample_with_torch(
       tensors required for Pythonization
     '''
 
-    categorized_seq_group_ids: Dict[SamplingType,
-                                    List[int]] = {t: []
-                                                  for t in SamplingType}
+    categorized_seq_group_ids: Dict[SamplingType, List[int]] = {
+        t: []
+        for t in SamplingType
+    }
     categorized_sample_indices = sampling_metadata.categorized_sample_indices
     for i, seq_group in enumerate(sampling_metadata.seq_groups):
         sampling_params = seq_group.sampling_params
@@ -797,12 +771,11 @@ def _sample_with_torch(
                                              greedy_samples)
 
         elif sampling_type in (SamplingType.RANDOM, SamplingType.RANDOM_SEED):
-            max_best_of_in_batch = 1
+            max_n_in_batch = 1
             for seq_group in seq_groups:
                 if seq_group.is_prompt:
                     sampling_params = seq_group.sampling_params
-                    max_best_of_in_batch = max(max_best_of_in_batch,
-                                               sampling_params.best_of)
+                    max_n_in_batch = max(max_n_in_batch, sampling_params.n)
             seq_groups_arg = (None if sampling_type == SamplingType.RANDOM else
                               seq_groups)
 
@@ -812,13 +785,13 @@ def _sample_with_torch(
                         probs[long_sample_indices],
                         sampling_tensors.top_ks[long_sample_indices],
                         sampling_tensors.top_ps[long_sample_indices],
-                        max_best_of_in_batch,
+                        max_n_in_batch,
                         seq_groups_arg,
                     )
             else:
                 multinomial_samples[sampling_type] = _multinomial(
                     probs[long_sample_indices],
-                    max_best_of_in_batch,
+                    max_n_in_batch,
                     seq_groups=seq_groups_arg)
 
             if sampled_token_ids_tensor is not None:

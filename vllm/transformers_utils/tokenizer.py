@@ -1,3 +1,4 @@
+import contextlib
 import os
 import warnings
 from pathlib import Path
@@ -21,6 +22,38 @@ AnyTokenizer = Union[PreTrainedTokenizer, PreTrainedTokenizerFast,
                      MistralTokenizer]
 
 
+def decode_tokens(
+    tokenizer: AnyTokenizer,
+    token_ids: list[int],
+    *,
+    skip_special_tokens: bool = False,
+) -> str:
+    """
+    Backend-agnostic equivalent of HF's
+    :code:`tokenizer.decode(token_ids, skip_special_tokens=...)`.
+    """
+    return tokenizer.decode(token_ids, skip_special_tokens=skip_special_tokens)
+
+
+def encode_tokens(
+    tokenizer: AnyTokenizer,
+    text: str,
+    *,
+    add_special_tokens: Optional[bool] = None,
+) -> list[int]:
+    """
+    Backend-agnostic equivalent of HF's
+    :code:`tokenizer.encode(text, add_special_tokens=...)`.
+    """
+    if isinstance(tokenizer, MistralTokenizer):
+        return tokenizer.tokenizer.encode(text,
+                                          bos=add_special_tokens,
+                                          eos=add_special_tokens)
+    elif add_special_tokens is not None:
+        return tokenizer.encode(text, add_special_tokens=add_special_tokens)
+    return tokenizer.encode(text)
+
+
 def get_cached_tokenizer(tokenizer: AnyTokenizer) -> AnyTokenizer:
     """Get tokenizer with cached properties.
 
@@ -34,7 +67,17 @@ def get_cached_tokenizer(tokenizer: AnyTokenizer) -> AnyTokenizer:
     tokenizer_all_special_tokens_extended = (
         tokenizer.all_special_tokens_extended)
     tokenizer_all_special_tokens = set(tokenizer.all_special_tokens)
+    tokenizer_vocab = tokenizer.get_vocab()
     tokenizer_len = len(tokenizer)
+
+    max_token_id = max(tokenizer_vocab.values())
+    # Some tokenizers (e.g., QwenTokenizer) have special tokens that
+    # are added and included in the implementation of the vocab_size
+    # property, but not in get_vocab(); if there is an implementation
+    # of vocab size, we should take the greater value.
+    if hasattr(tokenizer, "vocab_size"):
+        with contextlib.suppress(NotImplementedError):
+            max_token_id = max(max_token_id, tokenizer.vocab_size)
 
     class CachedTokenizer(tokenizer.__class__):  # type: ignore
 
@@ -50,6 +93,13 @@ def get_cached_tokenizer(tokenizer: AnyTokenizer) -> AnyTokenizer:
         def all_special_tokens_extended(self):
             return tokenizer_all_special_tokens_extended
 
+        @property
+        def max_token_id(self):
+            return max_token_id
+
+        def get_vocab(self):
+            return tokenizer_vocab
+
         def __len__(self):
             return tokenizer_len
 
@@ -57,6 +107,26 @@ def get_cached_tokenizer(tokenizer: AnyTokenizer) -> AnyTokenizer:
 
     tokenizer.__class__ = CachedTokenizer
     return tokenizer
+
+
+def patch_padding_side(tokenizer: PreTrainedTokenizer) -> None:
+    """Patch _pad method to accept `padding_side` for older tokenizers."""
+    orig_pad = tokenizer._pad
+
+    def _pad(
+        self: PreTrainedTokenizer,
+        *args,
+        padding_side: Optional[str] = None,
+        **kwargs,
+    ):
+        if padding_side is not None and padding_side != self.padding_side:
+            msg = ("`padding_side` argument is not supported by "
+                   f"{type(tokenizer).__name__} and will be ignored.")
+            warnings.warn(msg, stacklevel=2)
+
+        return orig_pad(*args, **kwargs)
+
+    tokenizer._pad = MethodType(_pad, tokenizer)
 
 
 def get_tokenizer(
@@ -107,7 +177,7 @@ def get_tokenizer(
     if is_from_mistral_org and tokenizer_mode != "mistral":
         warnings.warn(
             'It is strongly recommended to run mistral models with '
-            '`--tokenizer_mode "mistral"` to ensure correct '
+            '`--tokenizer-mode "mistral"` to ensure correct '
             'encoding and decoding.',
             FutureWarning,
             stacklevel=2)
@@ -143,24 +213,7 @@ def get_tokenizer(
         if type(tokenizer).__name__ in ("ChatGLMTokenizer",
                                         "ChatGLM4Tokenizer"):
             assert isinstance(tokenizer, PreTrainedTokenizer)
-            orig_pad = tokenizer._pad
-
-            # Patch _pad method to accept `padding_side`
-            def _pad(
-                self: PreTrainedTokenizer,
-                *args,
-                padding_side: Optional[str] = None,
-                **kwargs,
-            ):
-                if (padding_side is not None
-                        and padding_side != self.padding_side):
-                    msg = ("`padding_side` argument is not supported by "
-                           "ChatGLMTokenizer and will be ignored.")
-                    warnings.warn(msg, stacklevel=2)
-
-                return orig_pad(*args, **kwargs)
-
-            tokenizer._pad = MethodType(_pad, tokenizer)
+            patch_padding_side(tokenizer)
 
         if not isinstance(tokenizer, PreTrainedTokenizerFast):
             logger.warning(
