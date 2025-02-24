@@ -89,7 +89,12 @@ def warmup_device(args: argparse.Namespace, num_warmup: int = 1):
 
     for i in tqdm(range(num_warmup), desc="Warming up LLMEngine"):
         warmup_engine = LLMEngine.from_engine_args(
-            engine_args=EngineArgs(model=args.model),
+            engine_args=EngineArgs(
+                model=args.model,
+                load_format="dummy",
+                trust_remote_code=True,
+                max_model_len=MAX_TOKENS
+            ),
         )
         warmup_engine.add_request(
             request_id=str(i),
@@ -120,17 +125,26 @@ def main(args: argparse.Namespace):
             )
             continue
 
+        prefill_len = int(benchmark_dim.max_seq_len * args.prefill_ratio)
+        decode_len = int(benchmark_dim.max_seq_len * (1 - args.prefill_ratio))
+
+        path_stem = f"decode_msl_{benchmark_dim.max_seq_len}_bs_{benchmark_dim.batch_size}_pl_{prefill_len}"
+        if os.path.exists(path_stem + ".csv"):
+            print(
+                f"WARN >> Skipping {benchmark_dim} since CSV already exists."
+            )
+            continue
+
         print("INFO >> Running benchmark with dimension:")
         print(f"INFO >> ===== {benchmark_dim} =====")
         print(
             f"INFO >> ===== Number of total tokens: {benchmark_dim.max_seq_len * benchmark_dim.batch_size} ====="
         )
 
-        prefill_len = int(benchmark_dim.max_seq_len * args.prefill_ratio)
-        decode_len = int(benchmark_dim.max_seq_len * (1 - args.prefill_ratio))
-
         engine_args = EngineArgs(
             model=args.model,
+            load_format="dummy",
+            trust_remote_code=True,
             disable_log_stats=False,
             max_num_seqs=benchmark_dim.batch_size,
             enable_chunked_prefill=False,
@@ -202,6 +216,7 @@ def main(args: argparse.Namespace):
         p0_time = (time_p0_e - time_p0_s) / 1e9
         p1_time = (time_p1_e - time_p1_s) / 1e9
         step_latencies = np.diff(np.array(event_timestamps)) / 1e9
+        decode_latency_all_requests = (event_timestamps[-1] - event_timestamps[0]) / 1e9
 
         print("+==================== Benchmark completed ====================")
         print(f"ö===== Dimension: {benchmark_dim}")
@@ -215,6 +230,7 @@ def main(args: argparse.Namespace):
             f"ö===== Latency P2 (max): {step_latencies.max():.4f} sec, at index {step_latencies.argmax()}"
         )
         print(f"ö===== Number of steps: {len(step_latencies)}")
+        print(f"====== Decode latency of all requests (inverse of throughput): {decode_latency_all_requests:.4f}")
         print("+=============================================================")
 
         # Create one row per step latency
@@ -226,10 +242,10 @@ def main(args: argparse.Namespace):
                     "batch_size": benchmark_dim.batch_size,
                     "step": step_idx,
                     "latency": latency,
+                    # Since we only count decodes
+                    "throughput": benchmark_dim.batch_size * benchmark_dim.max_seq_len / (2 *decode_latency_all_requests),
                 }
             )
-
-        path_stem = f"decode_msl_{benchmark_dim.max_seq_len}_bs_{benchmark_dim.batch_size}_pl_{prefill_len}.csv"
 
         with open(path_stem + ".csv", mode="a", newline="") as f:
             df = pd.DataFrame(benchmark_results)
@@ -239,19 +255,6 @@ def main(args: argparse.Namespace):
                 df.to_csv(f, header=False, index=False)
             f.flush()
 
-        # Generate and save the plot
-        plt.figure(figsize=(10, 6))
-        plt.plot(df["step"], df["latency"], "-o")
-        plt.xlabel("Step")
-        plt.ylabel("Latency (seconds)")
-        plt.title(
-            f"Decoding Latency, max_seq_len={benchmark_dim.max_seq_len}, batch_size={benchmark_dim.batch_size}, prefill_tokens={prefill_len}"
-        )
-        plt.grid(True)
-
-        plt.savefig(path_stem + ".png")
-        plt.close()  # Close the figure to free memory
-
 
 if __name__ == "__main__":
     parser = FlexibleArgumentParser(
@@ -260,7 +263,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--model",
         type=str,
-        default="meta-llama/Llama-3.1-8B",
+        default="meta-llama/Llama-3.1-8B-Instruct",
         help="Name or path of the huggingface model to use.",
     )
     # parser.add_argument(
